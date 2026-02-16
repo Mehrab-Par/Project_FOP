@@ -79,6 +79,37 @@ namespace Engine {
     float distanceToSprite(GameState& state, const std::string& spriteName);
     bool isKeyPressed(GameState& state, const std::string& key);
     void executeAsk(GameState& state, Block* block);
+    // ── Variables ──
+    void executeSetVariable(GameState& state, Block* block);
+    void executeChangeVariable(GameState& state, Block* block);
 
+    // ── Custom Functions ──
+    void executeCallFunction(GameState& state, Block* block);
+    void executeDefineFunction(GameState& state, Block* block);
+    void executeFunctionBody(GameState& state, const FunctionDef& func,
+                             const std::vector<Value>& args);
+
+    // ── Pen ──
+    void executePenDown(GameState& state, Block* block);
+    void executePenUp(GameState& state, Block* block);
+    void executeStamp(GameState& state, Block* block);
+    void executeEraseAll(GameState& state, Block* block);
+    void executeSetPenColor(GameState& state, Block* block);
+    void executeSetPenSize(GameState& state, Block* block);
+    void executeChangePenSize(GameState& state, Block* block);
+    // ── Expression Evaluator ──
+    Value evaluateExpression(GameState& state, Block* exprBlock);
+    bool  evaluateCondition(GameState& state, Block* condBlock);
+    Value resolveVariable(GameState& state, const std::string& name);
+    // ── Safety ──
+    bool  watchdogCheck(GameState& state);
+    void  clampPosition(GameState& state, Sprite& sprite);
+    Value safeDivide(double a, double b, GameState& state, int line);
+    Value safeSqrt(double x, GameState& state, int line);
+
+    // ── Debug ──
+    void checkDebugMode(GameState& state);
+    // ── Speech bubble timer ──
+    void updateSpeechBubbles(GameState& state, float dt);
 
 }

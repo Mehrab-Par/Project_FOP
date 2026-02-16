@@ -900,5 +900,182 @@ void executeAsk(GameState& state, Block* block) {
     Logger::logInfo(state, block->sourceLine, "ASK", "Question", question);
 }
 
+// CUSTOM FUNCTIONS
+
+
+void executeDefineFunction(GameState& state, Block* block) {
+    FunctionDef func;
+    func.name       = block->name;
+    func.paramNames = block->paramNames;
+    func.body       = block->body;
+    state.functions[func.name] = func;
+    Logger::logInfo(state, block->sourceLine, "DEFINE_FN", "Defined", func.name);
+}
+
+void executeCallFunction(GameState& state, Block* block) {
+    std::string name = block->name;
+    if (state.functions.find(name) == state.functions.end()) {
+        Logger::logError(state, block->sourceLine, "CALL_FN", "NotFound", name);
+        return;
+    }
+    const FunctionDef& func = state.functions[name];
+
+    // Evaluate arguments
+    std::vector<Value> args;
+    for (size_t i = 0; i < block->params.size(); i++) {
+        args.push_back(evaluateExpression(state, block->params[i]));
+    }
+
+    executeFunctionBody(state, func, args);
+    Logger::logInfo(state, block->sourceLine, "CALL_FN", "Called", name);
+}
+
+void executeFunctionBody(GameState& state, const FunctionDef& func,
+                         const std::vector<Value>& args) {
+    // Save current variables, set params
+    ExecutionContext::CallFrame frame;
+    frame.returnPC = state.execCtx.pc;
+
+    // Set parameter variables
+    for (size_t i = 0; i < func.paramNames.size() && i < args.size(); i++) {
+        if (state.variables.count(func.paramNames[i]))
+            frame.localVars[func.paramNames[i]] = state.variables[func.paramNames[i]];
+        state.variables[func.paramNames[i]] = args[i];
+    }
+    state.execCtx.callStack.push_back(frame);
+
+    // Execute body blocks inline
+    // We insert them temporarily into editorBlocks
+    int insertAt = state.execCtx.pc;
+    for (size_t i = 0; i < func.body.size(); i++) {
+        state.editorBlocks.insert(state.editorBlocks.begin() + insertAt + (int)i, func.body[i]);
+    }
+    // Re-preprocess to fix jump targets
+    preProcessBlocks(state, state.editorBlocks);
+
+    // After body executes, we'll restore via a special end marker
+    // For simplicity, we execute the body directly here
+    int savedPC = state.execCtx.pc;
+    state.execCtx.pc = insertAt;
+
+    for (size_t i = 0; i < func.body.size(); i++) {
+        if (!state.execCtx.isRunning) break;
+        Block* b = state.editorBlocks[state.execCtx.pc];
+        state.execCtx.pc++;
+        if (b) executeBlock(state, b, 0.016f);
+    }
+
+    // Restore
+    // Remove inserted blocks
+    state.editorBlocks.erase(
+        state.editorBlocks.begin() + insertAt,
+        state.editorBlocks.begin() + insertAt + (int)func.body.size()
+    );
+    state.execCtx.pc = savedPC;
+
+    // Restore local vars
+    if (!state.execCtx.callStack.empty()) {
+        auto& cf = state.execCtx.callStack.back();
+        for (auto& it : cf.localVars)
+        {
+            const std::string& k = it.first;
+            Value& v = it.second;
+            state.variables[k] = v;
+        }
+        state.execCtx.callStack.pop_back();
+    }
+}
+
+// PEN BLOCKS
+
+void executePenDown(GameState& state, Block* block) {
+    Sprite* sprite = getActiveSprite(state);
+    if (!sprite) return;
+    sprite->penDown = true;
+    Logger::logInfo(state, block->sourceLine, "PEN", "Down", "Pen down");
+}
+
+void executePenUp(GameState& state, Block* block) {
+    Sprite* sprite = getActiveSprite(state);
+    if (!sprite) return;
+    sprite->penDown = false;
+    Logger::logInfo(state, block->sourceLine, "PEN", "Up", "Pen up");
+}
+
+void executeStamp(GameState& state, Block* block) {
+    Sprite* sprite = getActiveSprite(state);
+    if (!sprite) return;
+    PenStamp stamp;
+    stamp.x    = sprite->x;
+    stamp.y    = sprite->y;
+    stamp.size = sprite->size;
+    if (!sprite->costumes.empty())
+        stamp.texture = sprite->costumes[sprite->currentCostume].texture;
+    state.penStamps.push_back(stamp);
+    Logger::logInfo(state, block->sourceLine, "PEN", "Stamp", "Stamped at (" +
+                    std::to_string((int)sprite->x) + "," + std::to_string((int)sprite->y) + ")");
+}
+
+void executeEraseAll(GameState& state, Block* block) {
+    state.penStrokes.clear();
+    state.penStamps.clear();
+    Logger::logInfo(state, block->sourceLine, "PEN", "EraseAll", "All pen drawings cleared");
+}
+
+void executeSetPenColor(GameState& state, Block* block) {
+    Sprite* sprite = getActiveSprite(state);
+    if (!sprite) return;
+    double r = toDouble(evaluateExpression(state, block->params[0]));
+    double g = toDouble(evaluateExpression(state, block->params[1]));
+    double b = toDouble(evaluateExpression(state, block->params[2]));
+    sprite->penColor = {(Uint8)std::max(0.0, std::min(255.0, r)),
+                        (Uint8)std::max(0.0, std::min(255.0, g)),
+                        (Uint8)std::max(0.0, std::min(255.0, b)), 255};
+    Logger::logInfo(state, block->sourceLine, "PEN", "Color",
+                    "(" + std::to_string((int)r) + "," + std::to_string((int)g) + "," + std::to_string((int)b) + ")");
+}
+
+void executeSetPenSize(GameState& state, Block* block) {
+    Sprite* sprite = getActiveSprite(state);
+    if (!sprite) return;
+    double val = toDouble(evaluateExpression(state, block->params[0]));
+    sprite->penSize = std::max(1, (int)val);
+    Logger::logInfo(state, block->sourceLine, "PEN", "SetSize", std::to_string(sprite->penSize));
+}
+
+void executeChangePenSize(GameState& state, Block* block) {
+    Sprite* sprite = getActiveSprite(state);
+    if (!sprite) return;
+    double val = toDouble(evaluateExpression(state, block->params[0]));
+    sprite->penSize = std::max(1, sprite->penSize + (int)val);
+    Logger::logInfo(state, block->sourceLine, "PEN", "ChangeSize", std::to_string(sprite->penSize));
+}
+    // Expression Evaluator
+    Value evaluateExpression(GameState& state, Block* exprBlock) {}
+    bool  evaluateCondition(GameState& state, Block* condBlock){}
+    Value resolveVariable(GameState& state, const std::string& name){}
+
+    // Safety
+    bool  watchdogCheck(GameState& state){}
+    void  clampPosition(GameState& state, Sprite& sprite){}
+    Value safeDivide(double a, double b, GameState& state, int line){}
+    Value safeSqrt(double x, GameState& state, int line){}
+
+    //  Debug
+    void checkDebugMode(GameState& state){}
+
+
+    // SPEECH BUBBLE TIMER
+    void updateSpeechBubbles(GameState& state, float dt) {
+    for (auto* sprite : state.sprites) {
+        if (sprite->speechTimer > 0.0f) {
+            sprite->speechTimer -= dt;
+            if (sprite->speechTimer <= 0.0f) {
+                sprite->speechText  = "";
+                sprite->speechTimer = -1.0f;
+            }
+        }
+    }
+}
 
 }
