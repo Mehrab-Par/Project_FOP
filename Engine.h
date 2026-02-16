@@ -63,6 +63,22 @@ namespace Engine {
 
     // ── Events ──
     void executeBroadcast(GameState& state, Block* block);
+    // ── Control Flow ──
+    void executeWait(GameState& state, Block* block, float dt);
+    void executeRepeat(GameState& state, Block* block);
+    void executeForever(GameState& state, Block* block);
+    void executeIfThen(GameState& state, Block* block);
+    void executeIfThenElse(GameState& state, Block* block);
+    void executeWaitUntil(GameState& state, Block* block);
+    void executeRepeatUntil(GameState& state, Block* block);
+    void executeStopAll(GameState& state, Block* block);
+    // ── Sensing ──
+    bool isTouchingMouse(GameState& state);
+    bool isTouchingEdge(GameState& state);
+    float distanceToMouse(GameState& state);
+    float distanceToSprite(GameState& state, const std::string& spriteName);
+    bool isKeyPressed(GameState& state, const std::string& key);
+    void executeAsk(GameState& state, Block* block);
 
 
 }

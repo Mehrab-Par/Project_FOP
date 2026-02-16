@@ -759,5 +759,146 @@ void executeBroadcast(GameState& state, Block* block) {
 }
 
 
+// CONTROL FLOW
+
+void executeWait(GameState& state, Block* block, float dt) {
+    double secs = toDouble(evaluateExpression(state, block->params[0]));
+    state.execCtx.waitTimer = (float)secs;
+    state.execCtx.pc--; // stay on this block until timer finishes
+    Logger::logInfo(state, block->sourceLine, "WAIT", "Timer", std::to_string((int)secs) + "s");
+}
+
+void executeRepeat(GameState& state, Block* block) {
+    double count = toDouble(evaluateExpression(state, block->params[0]));
+    int icount = (int)count;
+    if (icount <= 0) {
+        // Skip to EndRepeat
+        if (block->jumpTarget >= 0) jumpTo(state, block->jumpTarget + 1);
+        return;
+    }
+    state.execCtx.loopStack.push_back(icount);
+    state.execCtx.loopReturnStack.push_back(state.execCtx.pc - 1); // index of Repeat block
+    Logger::logInfo(state, block->sourceLine, "REPEAT", "Start", std::to_string(icount) + " times");
+}
+
+void executeForever(GameState& state, Block* block) {
+    state.execCtx.loopReturnStack.push_back(state.execCtx.pc - 1);
+    Logger::logInfo(state, block->sourceLine, "FOREVER", "Start", "infinite loop");
+}
+
+void executeIfThen(GameState& state, Block* block) {
+    bool cond = evaluateCondition(state, block->params[0]);
+    if (!cond) {
+        // Jump to EndIf
+        if (block->jumpTarget >= 0) jumpTo(state, block->jumpTarget + 1);
+        Logger::logInfo(state, block->sourceLine, "IF", "Branch", "FALSE -> skip");
+    } else {
+        Logger::logInfo(state, block->sourceLine, "IF", "Branch", "TRUE -> enter");
+    }
+}
+
+void executeIfThenElse(GameState& state, Block* block) {
+    bool cond = evaluateCondition(state, block->params[0]);
+    if (!cond) {
+        // Jump to Else + 1
+        if (block->elseTarget >= 0) jumpTo(state, block->elseTarget + 1);
+        Logger::logInfo(state, block->sourceLine, "IF_ELSE", "Branch", "FALSE -> else");
+    } else {
+        Logger::logInfo(state, block->sourceLine, "IF_ELSE", "Branch", "TRUE -> if body");
+    }
+}
+
+void executeWaitUntil(GameState& state, Block* block) {
+    bool cond = evaluateCondition(state, block->params[0]);
+    if (!cond) {
+        state.execCtx.waitingUntil = true;
+        state.execCtx.pc--; // stay on this block
+        Logger::logInfo(state, block->sourceLine, "WAIT_UNTIL", "Waiting", "condition not met");
+    } else {
+        Logger::logInfo(state, block->sourceLine, "WAIT_UNTIL", "Continue", "condition met");
+    }
+}
+
+void executeRepeatUntil(GameState& state, Block* block) {
+    bool cond = evaluateCondition(state, block->params[0]);
+    if (cond) {
+        // Exit loop: jump to EndRepeat + 1
+        if (block->jumpTarget >= 0) jumpTo(state, block->jumpTarget + 1);
+        Logger::logInfo(state, block->sourceLine, "REPEAT_UNTIL", "Exit", "condition met");
+    } else {
+        // Enter/continue loop body
+        state.execCtx.loopReturnStack.push_back(state.execCtx.pc - 1);
+        Logger::logInfo(state, block->sourceLine, "REPEAT_UNTIL", "Loop", "condition not met");
+    }
+}
+
+void executeStopAll(GameState& state, Block* block) {
+    state.execCtx.isRunning = false;
+    Logger::logInfo(state, block->sourceLine, "STOP_ALL", "Halt", "All stopped");
+}
+
+// SENSING
+
+bool isTouchingMouse(GameState& state) {
+    Sprite* sprite = getActiveSprite(state);
+    if (!sprite) return false;
+    int mx = state.mouseX - state.stageX;
+    int my = state.mouseY - state.stageY;
+    float hw = 32.0f * sprite->size / 100.0f;
+    float hh = 32.0f * sprite->size / 100.0f;
+    return (mx >= sprite->x - hw && mx <= sprite->x + hw &&
+            my >= sprite->y - hh && my <= sprite->y + hh);
+}
+
+bool isTouchingEdge(GameState& state) {
+    Sprite* sprite = getActiveSprite(state);
+    if (!sprite) return false;
+    return (sprite->x <= 0.0f || sprite->x >= (float)state.stageWidth ||
+            sprite->y <= 0.0f || sprite->y >= (float)state.stageHeight);
+}
+
+float distanceToMouse(GameState& state) {
+    Sprite* sprite = getActiveSprite(state);
+    if (!sprite) return 0.0f;
+    float mx = (float)(state.mouseX - state.stageX);
+    float my = (float)(state.mouseY - state.stageY);
+    float dx = sprite->x - mx;
+    float dy = sprite->y - my;
+    return std::sqrt(dx*dx + dy*dy);
+}
+
+float distanceToSprite(GameState& state, const std::string& name) {
+    Sprite* sprite = getActiveSprite(state);
+    if (!sprite) return 0.0f;
+    for (auto* s : state.sprites) {
+        if (s->name == name && s != sprite) {
+            float dx = sprite->x - s->x;
+            float dy = sprite->y - s->y;
+            return std::sqrt(dx*dx + dy*dy);
+        }
+    }
+    return 0.0f;
+}
+
+bool isKeyPressed(GameState& state, const std::string& key) {
+    const Uint8* keys = SDL_GetKeyboardState(nullptr);
+    if (key == "space")     return keys[SDL_SCANCODE_SPACE];
+    if (key == "up")        return keys[SDL_SCANCODE_UP];
+    if (key == "down")      return keys[SDL_SCANCODE_DOWN];
+    if (key == "left")      return keys[SDL_SCANCODE_LEFT];
+    if (key == "right")     return keys[SDL_SCANCODE_RIGHT];
+    if (key == "enter")     return keys[SDL_SCANCODE_RETURN];
+    if (key.size() == 1)    return keys[SDL_SCANCODE_A + (key[0] - 'a')];
+    return false;
+}
+
+void executeAsk(GameState& state, Block* block) {
+    std::string question = toString(evaluateExpression(state, block->params[0]));
+    state.askQuestion     = question;
+    state.waitingForAnswer = true;
+    state.userAnswer       = "";
+    Logger::logInfo(state, block->sourceLine, "ASK", "Question", question);
+}
+
 
 }
