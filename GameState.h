@@ -404,4 +404,3 @@ struct GameState {
 
     ~GameState();
 };
-_H
