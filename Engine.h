@@ -34,7 +34,35 @@ namespace Engine {
     void executeGoToRandom(GameState& state, Block* block);
     void executeGoToMouse(GameState& state, Block* block);
     void executeBounceOffEdge(GameState& state, Block* block);
+    // ── Looks ──
+    void executeSay(GameState& state, Block* block);
+    void executeSayForTime(GameState& state, Block* block);
+    void executeThink(GameState& state, Block* block);
+    void executeThinkForTime(GameState& state, Block* block);
+    void executeSwitchCostume(GameState& state, Block* block);
+    void executeNextCostume(GameState& state, Block* block);
+    void executeSwitchBackdrop(GameState& state, Block* block);
+    void executeNextBackdrop(GameState& state, Block* block);
+    void executeChangeSize(GameState& state, Block* block);
+    void executeSetSize(GameState& state, Block* block);
+    void executeShow(GameState& state, Block* block);
+    void executeHide(GameState& state, Block* block);
+    void executeGoToFrontLayer(GameState& state, Block* block);
+    void executeGoToBackLayer(GameState& state, Block* block);
+    void executeMoveLayerForward(GameState& state, Block* block);
+    void executeMoveLayerBackward(GameState& state, Block* block);
+    void executeChangeGraphicEffect(GameState& state, Block* block);
+    void executeSetGraphicEffect(GameState& state, Block* block);
+    void executeClearGraphicEffects(GameState& state, Block* block);
+    // ── Sound ──
+    void executePlaySound(GameState& state, Block* block);
+    void executePlaySoundUntilDone(GameState& state, Block* block);
+    void executeStopAllSounds(GameState& state, Block* block);
+    void executeSetVolume(GameState& state, Block* block);
+    void executeChangeVolume(GameState& state, Block* block);
 
+    // ── Events ──
+    void executeBroadcast(GameState& state, Block* block);
 
 
 }

@@ -532,5 +532,232 @@ void executeBounceOffEdge(GameState& state, Block* block) {
 }
 
 
+// LOOKS BLOCKS
+void executeSay(GameState& state, Block* block) {
+    Sprite* sprite = getActiveSprite(state);
+    if (!sprite) return;
+    std::string text = toString(evaluateExpression(state, block->params[0]));
+    sprite->speechText = text;
+    sprite->isThinker  = false;
+    sprite->speechTimer = -1.0f; // permanent
+    Logger::logInfo(state, block->sourceLine, "SAY", "Text", text);
+}
+
+void executeSayForTime(GameState& state, Block* block) {
+    Sprite* sprite = getActiveSprite(state);
+    if (!sprite) return;
+    std::string text = toString(evaluateExpression(state, block->params[0]));
+    double secs      = toDouble(evaluateExpression(state, block->params[1]));
+    sprite->speechText  = text;
+    sprite->isThinker   = false;
+    sprite->speechTimer = (float)secs;
+    Logger::logInfo(state, block->sourceLine, "SAY_FOR", "Text", text + " for " + std::to_string((int)secs) + "s");
+}
+
+void executeThink(GameState& state, Block* block) {
+    Sprite* sprite = getActiveSprite(state);
+    if (!sprite) return;
+    std::string text = toString(evaluateExpression(state, block->params[0]));
+    sprite->speechText = text;
+    sprite->isThinker  = true;
+    sprite->speechTimer = -1.0f;
+    Logger::logInfo(state, block->sourceLine, "THINK", "Text", text);
+}
+
+void executeThinkForTime(GameState& state, Block* block) {
+    Sprite* sprite = getActiveSprite(state);
+    if (!sprite) return;
+    std::string text = toString(evaluateExpression(state, block->params[0]));
+    double secs      = toDouble(evaluateExpression(state, block->params[1]));
+    sprite->speechText  = text;
+    sprite->isThinker   = true;
+    sprite->speechTimer = (float)secs;
+    Logger::logInfo(state, block->sourceLine, "THINK_FOR", "Text", text + " for " + std::to_string((int)secs) + "s");
+}
+
+void executeSwitchCostume(GameState& state, Block* block) {
+    Sprite* sprite = getActiveSprite(state);
+    if (!sprite) return;
+    std::string name = toString(evaluateExpression(state, block->params[0]));
+    for (int i = 0; i < (int)sprite->costumes.size(); i++) {
+        if (sprite->costumes[i].name == name) {
+            sprite->currentCostume = i;
+            Logger::logInfo(state, block->sourceLine, "COSTUME", "Switch", name);
+            return;
+        }
+    }
+    Logger::logWarning(state, block->sourceLine, "COSTUME", "Switch", "Costume not found: " + name);
+}
+
+void executeNextCostume(GameState& state, Block* block) {
+    Sprite* sprite = getActiveSprite(state);
+    if (!sprite || sprite->costumes.empty()) return;
+    sprite->currentCostume = (sprite->currentCostume + 1) % (int)sprite->costumes.size();
+    Logger::logInfo(state, block->sourceLine, "COSTUME", "Next", std::to_string(sprite->currentCostume));
+}
+
+void executeSwitchBackdrop(GameState& state, Block* block) {
+    std::string name = toString(evaluateExpression(state, block->params[0]));
+    for (int i = 0; i < (int)state.backdrops.size(); i++) {
+        if (state.backdrops[i].name == name) {
+            state.currentBackdrop = i;
+            Logger::logInfo(state, block->sourceLine, "BACKDROP", "Switch", name);
+            return;
+        }
+    }
+    Logger::logWarning(state, block->sourceLine, "BACKDROP", "Switch", "Backdrop not found: " + name);
+}
+
+void executeNextBackdrop(GameState& state, Block* block) {
+    if (state.backdrops.empty()) return;
+    state.currentBackdrop = (state.currentBackdrop + 1) % (int)state.backdrops.size();
+    Logger::logInfo(state, block->sourceLine, "BACKDROP", "Next", std::to_string(state.currentBackdrop));
+}
+
+void executeChangeSize(GameState& state, Block* block) {
+    Sprite* sprite = getActiveSprite(state);
+    if (!sprite) return;
+    double val = toDouble(evaluateExpression(state, block->params[0]));
+    float oldSize = sprite->size;
+    sprite->size = std::max(1.0f, sprite->size + (float)val);
+    Logger::logInfo(state, block->sourceLine, "SIZE", "Change",
+                    std::to_string((int)oldSize) + "% -> " + std::to_string((int)sprite->size) + "%");
+}
+
+void executeSetSize(GameState& state, Block* block) {
+    Sprite* sprite = getActiveSprite(state);
+    if (!sprite) return;
+    double val = toDouble(evaluateExpression(state, block->params[0]));
+    sprite->size = std::max(1.0f, (float)val);
+    Logger::logInfo(state, block->sourceLine, "SIZE", "Set", std::to_string((int)sprite->size) + "%");
+}
+
+void executeShow(GameState& state, Block* block) {
+    Sprite* sprite = getActiveSprite(state);
+    if (!sprite) return;
+    sprite->visible = true;
+    Logger::logInfo(state, block->sourceLine, "SHOW", "Visible", "true");
+}
+
+void executeHide(GameState& state, Block* block) {
+    Sprite* sprite = getActiveSprite(state);
+    if (!sprite) return;
+    sprite->visible = false;
+    Logger::logInfo(state, block->sourceLine, "HIDE", "Visible", "false");
+}
+
+void executeGoToFrontLayer(GameState& state, Block* block) {
+    Sprite* sprite = getActiveSprite(state);
+    if (!sprite) return;
+    int maxLayer = 0;
+    for (auto* s : state.sprites) maxLayer = std::max(maxLayer, s->layer);
+    sprite->layer = maxLayer + 1;
+    Logger::logInfo(state, block->sourceLine, "LAYER", "Front", std::to_string(sprite->layer));
+}
+
+void executeGoToBackLayer(GameState& state, Block* block) {
+    Sprite* sprite = getActiveSprite(state);
+    if (!sprite) return;
+    int minLayer = 0;
+    for (auto* s : state.sprites) minLayer = std::min(minLayer, s->layer);
+    sprite->layer = minLayer - 1;
+    Logger::logInfo(state, block->sourceLine, "LAYER", "Back", std::to_string(sprite->layer));
+}
+
+void executeMoveLayerForward(GameState& state, Block* block) {
+    Sprite* sprite = getActiveSprite(state);
+    if (!sprite) return;
+    double val = toDouble(evaluateExpression(state, block->params[0]));
+    sprite->layer += (int)val;
+    Logger::logInfo(state, block->sourceLine, "LAYER", "Forward", std::to_string(sprite->layer));
+}
+
+void executeMoveLayerBackward(GameState& state, Block* block) {
+    Sprite* sprite = getActiveSprite(state);
+    if (!sprite) return;
+    double val = toDouble(evaluateExpression(state, block->params[0]));
+    sprite->layer -= (int)val;
+    Logger::logInfo(state, block->sourceLine, "LAYER", "Backward", std::to_string(sprite->layer));
+}
+
+void executeChangeGraphicEffect(GameState& state, Block* block) {
+    Sprite* sprite = getActiveSprite(state);
+    if (!sprite) return;
+    double val = toDouble(evaluateExpression(state, block->params[0]));
+    sprite->colorEffect += (float)val;
+    Logger::logInfo(state, block->sourceLine, "EFFECT", "Change", std::to_string((int)sprite->colorEffect));
+}
+
+void executeSetGraphicEffect(GameState& state, Block* block) {
+    Sprite* sprite = getActiveSprite(state);
+    if (!sprite) return;
+    double val = toDouble(evaluateExpression(state, block->params[0]));
+    sprite->colorEffect = (float)val;
+    Logger::logInfo(state, block->sourceLine, "EFFECT", "Set", std::to_string((int)sprite->colorEffect));
+}
+
+void executeClearGraphicEffects(GameState& state, Block* block) {
+    Sprite* sprite = getActiveSprite(state);
+    if (!sprite) return;
+    sprite->colorEffect = 0.0f;
+    Logger::logInfo(state, block->sourceLine, "EFFECT", "Clear", "0");
+}
+
+// SOUND BLOCKS
+
+void executePlaySound(GameState& state, Block* block) {
+    Sprite* sprite = getActiveSprite(state);
+    if (!sprite) return;
+    std::string name = toString(evaluateExpression(state, block->params[0]));
+    for (auto& snd : sprite->sounds) {
+        if (snd.name == name && snd.chunk && !snd.muted) {
+            Mix_VolumeChunk(snd.chunk, (int)(snd.volume * MIX_MAX_VOLUME / 100));
+            snd.channel = Mix_PlayChannel(-1, snd.chunk, 0);
+            Logger::logInfo(state, block->sourceLine, "SOUND", "Play", name);
+            return;
+        }
+    }
+    Logger::logWarning(state, block->sourceLine, "SOUND", "Play", "Sound not found: " + name);
+}
+
+void executePlaySoundUntilDone(GameState& state, Block* block) {
+    // Same as PlaySound for now (blocking not implemented for simplicity)
+    executePlaySound(state, block);
+}
+
+void executeStopAllSounds(GameState& state, Block* block) {
+    Mix_HaltChannel(-1);
+    Logger::logInfo(state, block->sourceLine, "SOUND", "StopAll", "All sounds stopped");
+}
+
+void executeSetVolume(GameState& state, Block* block) {
+    Sprite* sprite = getActiveSprite(state);
+    if (!sprite) return;
+    double vol = toDouble(evaluateExpression(state, block->params[0]));
+    vol = std::max(0.0, std::min(100.0, vol));
+    for (auto& snd : sprite->sounds) snd.volume = (int)vol;
+    Logger::logInfo(state, block->sourceLine, "SOUND", "SetVolume", std::to_string((int)vol) + "%");
+}
+
+void executeChangeVolume(GameState& state, Block* block) {
+    Sprite* sprite = getActiveSprite(state);
+    if (!sprite) return;
+    double change = toDouble(evaluateExpression(state, block->params[0]));
+    for (auto& snd : sprite->sounds) {
+        snd.volume = std::max(0, std::min(100, snd.volume + (int)change));
+    }
+    Logger::logInfo(state, block->sourceLine, "SOUND", "ChangeVolume", std::to_string((int)change));
+}
+
+
+// EVENTS
+void executeBroadcast(GameState& state, Block* block) {
+    std::string msg = toString(evaluateExpression(state, block->params[0]));
+    state.lastBroadcast    = msg;
+    state.broadcastPending = true;
+    Logger::logInfo(state, block->sourceLine, "BROADCAST", "Send", msg);
+}
+
+
 
 }
