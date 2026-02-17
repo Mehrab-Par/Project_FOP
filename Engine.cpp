@@ -1050,23 +1050,237 @@ void executeChangePenSize(GameState& state, Block* block) {
     sprite->penSize = std::max(1, sprite->penSize + (int)val);
     Logger::logInfo(state, block->sourceLine, "PEN", "ChangeSize", std::to_string(sprite->penSize));
 }
-    // Expression Evaluator
-    Value evaluateExpression(GameState& state, Block* exprBlock) {}
-    bool  evaluateCondition(GameState& state, Block* condBlock){}
-    Value resolveVariable(GameState& state, const std::string& name){}
 
-    // Safety
-    bool  watchdogCheck(GameState& state){}
-    void  clampPosition(GameState& state, Sprite& sprite){}
-    Value safeDivide(double a, double b, GameState& state, int line){}
-    Value safeSqrt(double x, GameState& state, int line){}
+    // EXPRESSION EVALUATOR
 
-    //  Debug
-    void checkDebugMode(GameState& state){}
+Value evaluateExpression(GameState& state, Block* exprBlock) {
+    if (!exprBlock) return 0.0;
+
+    switch (exprBlock->type) {
+        case BlockType::Literal:
+            return exprBlock->literalValue;
+
+        // ── Arithmetic ──
+        case BlockType::Add: {
+            double a = toDouble(evaluateExpression(state, exprBlock->params[0]));
+            double b = toDouble(evaluateExpression(state, exprBlock->params[1]));
+            return a + b;
+        }
+        case BlockType::Subtract: {
+            double a = toDouble(evaluateExpression(state, exprBlock->params[0]));
+            double b = toDouble(evaluateExpression(state, exprBlock->params[1]));
+            return a - b;
+        }
+        case BlockType::Multiply: {
+            double a = toDouble(evaluateExpression(state, exprBlock->params[0]));
+            double b = toDouble(evaluateExpression(state, exprBlock->params[1]));
+            return a * b;
+        }
+        case BlockType::Divide: {
+            double a = toDouble(evaluateExpression(state, exprBlock->params[0]));
+            double b = toDouble(evaluateExpression(state, exprBlock->params[1]));
+            return safeDivide(a, b, state, exprBlock->sourceLine);
+        }
+        case BlockType::Modulo: {
+            double a = toDouble(evaluateExpression(state, exprBlock->params[0]));
+            double b = toDouble(evaluateExpression(state, exprBlock->params[1]));
+            if (b == 0.0) {
+                Logger::logWarning(state, exprBlock->sourceLine, "MOD", "DivByZero", "modulo by zero");
+                return 0.0;
+            }
+            return std::fmod(a, b);
+        }
+
+        // ── Math functions ──
+        case BlockType::Abs: {
+            double a = toDouble(evaluateExpression(state, exprBlock->params[0]));
+            return std::abs(a);
+        }
+        case BlockType::Sqrt: {
+            double a = toDouble(evaluateExpression(state, exprBlock->params[0]));
+            return safeSqrt(a, state, exprBlock->sourceLine);
+        }
+        case BlockType::Floor: {
+            double a = toDouble(evaluateExpression(state, exprBlock->params[0]));
+            return std::floor(a);
+        }
+        case BlockType::Ceiling: {
+            double a = toDouble(evaluateExpression(state, exprBlock->params[0]));
+            return std::ceil(a);
+        }
+        case BlockType::Sin: {
+            double a = toDouble(evaluateExpression(state, exprBlock->params[0]));
+            return std::sin(a * DEG_TO_RAD);
+        }
+        case BlockType::Cos: {
+            double a = toDouble(evaluateExpression(state, exprBlock->params[0]));
+            return std::cos(a * DEG_TO_RAD);
+        }
+
+        // ── Comparison ──
+        case BlockType::Equal: {
+            Value a = evaluateExpression(state, exprBlock->params[0]);
+            Value b = evaluateExpression(state, exprBlock->params[1]);
+            return toDouble(a) == toDouble(b);
+        }
+        case BlockType::LessThan: {
+            double a = toDouble(evaluateExpression(state, exprBlock->params[0]));
+            double b = toDouble(evaluateExpression(state, exprBlock->params[1]));
+            return a < b;
+        }
+        case BlockType::GreaterThan: {
+            double a = toDouble(evaluateExpression(state, exprBlock->params[0]));
+            double b = toDouble(evaluateExpression(state, exprBlock->params[1]));
+            return a > b;
+        }
+
+        // ── Logical ──
+        case BlockType::And: {
+            bool a = toBool(evaluateExpression(state, exprBlock->params[0]));
+            bool b = toBool(evaluateExpression(state, exprBlock->params[1]));
+            return a && b;
+        }
+        case BlockType::Or: {
+            bool a = toBool(evaluateExpression(state, exprBlock->params[0]));
+            bool b = toBool(evaluateExpression(state, exprBlock->params[1]));
+            return a || b;
+        }
+        case BlockType::Not: {
+            bool a = toBool(evaluateExpression(state, exprBlock->params[0]));
+            return !a;
+        }
+        case BlockType::Xor: {
+            bool a = toBool(evaluateExpression(state, exprBlock->params[0]));
+            bool b = toBool(evaluateExpression(state, exprBlock->params[1]));
+            return a != b;
+        }
+
+        // ── String operators ──
+        case BlockType::StringLength: {
+            std::string s = toString(evaluateExpression(state, exprBlock->params[0]));
+            return (double)s.size();
+        }
+        case BlockType::StringAt: {
+            std::string s = toString(evaluateExpression(state, exprBlock->params[0]));
+            int idx = (int)toDouble(evaluateExpression(state, exprBlock->params[1]));
+            // 1-based indexing
+            if (idx < 1 || idx > (int)s.size()) {
+                Logger::logWarning(state, exprBlock->sourceLine, "STRING_AT", "IndexOOB",
+                                   "Index " + std::to_string(idx) + " out of bounds");
+                return std::string("");
+            }
+            return std::string(1, s[idx - 1]);
+        }
+        case BlockType::StringJoin: {
+            std::string a = toString(evaluateExpression(state, exprBlock->params[0]));
+            std::string b = toString(evaluateExpression(state, exprBlock->params[1]));
+            return a + b;
+        }
+
+        // ── Sensing reporters ──
+        case BlockType::TouchingMouse:
+            return isTouchingMouse(state);
+        case BlockType::TouchingEdge:
+            return isTouchingEdge(state);
+        case BlockType::DistanceToMouse:
+            return (double)distanceToMouse(state);
+        case BlockType::KeyPressed: {
+            std::string key = exprBlock->name;
+            return isKeyPressed(state, key);
+        }
+        case BlockType::MouseDown:
+            return state.mouseDown;
+        case BlockType::MouseX:
+            return (double)(state.mouseX - state.stageX);
+        case BlockType::MouseY:
+            return (double)(state.mouseY - state.stageY);
+        case BlockType::Timer:
+            return (double)state.globalTimer;
+        case BlockType::Answer:
+            return state.userAnswer;
+
+        // ── Reporter blocks ──
+        case BlockType::ReporterCostumeNumber: {
+            Sprite* sprite = getActiveSprite(state);
+            return sprite ? (double)(sprite->currentCostume + 1) : 0.0;
+        }
+        case BlockType::ReporterBackdropNumber:
+            return (double)(state.currentBackdrop + 1);
+        case BlockType::ReporterSize: {
+            Sprite* sprite = getActiveSprite(state);
+            return sprite ? (double)sprite->size : 100.0;
+        }
+
+        default:
+            return 0.0;
+    }
+}
+
+bool evaluateCondition(GameState& state, Block* condBlock) {
+    Value result = evaluateExpression(state, condBlock);
+    return toBool(result);
+}
+
+Value resolveVariable(GameState& state, const std::string& name) {
+    // Check call stack local vars first
+    if (!state.execCtx.callStack.empty()) {
+        auto& frame = state.execCtx.callStack.back();
+        if (frame.localVars.count(name))
+            return frame.localVars[name];
+    }
+    if (state.variables.count(name))
+        return state.variables[name];
+    Logger::logWarning(state, 0, "VAR", "NotFound", name);
+    return 0.0;
+}
 
 
-    // SPEECH BUBBLE TIMER
-    void updateSpeechBubbles(GameState& state, float dt) {
+// SAFETY
+
+
+bool watchdogCheck(GameState& state) {
+    return state.execCtx.watchdogCounter >= ExecutionContext::WATCHDOG_MAX;
+}
+
+void clampPosition(GameState& state, Sprite& sprite) {
+    sprite.x = std::max(0.0f, std::min((float)state.stageWidth, sprite.x));
+    sprite.y = std::max(0.0f, std::min((float)state.stageHeight, sprite.y));
+}
+
+Value safeDivide(double a, double b, GameState& state, int line) {
+    if (b == 0.0) {
+        Logger::logWarning(state, line, "MATH", "DivByZero", "Division by zero");
+        return 0.0;
+    }
+    return a / b;
+}
+
+Value safeSqrt(double x, GameState& state, int line) {
+    if (x < 0.0) {
+        Logger::logWarning(state, line, "MATH", "NegSqrt", "Square root of negative number");
+        return 0.0;
+    }
+    return std::sqrt(x);
+}
+
+
+// DEBUG
+
+
+void checkDebugMode(GameState& state) {
+    if (!state.execCtx.isDebugMode) {
+        state.execCtx.waitingForStep = false;
+        return;
+    }
+    // In debug mode, we wait for spacebar
+    state.execCtx.waitingForStep = true;
+}
+
+
+// SPEECH BUBBLE TIMER
+
+
+void updateSpeechBubbles(GameState& state, float dt) {
     for (auto* sprite : state.sprites) {
         if (sprite->speechTimer > 0.0f) {
             sprite->speechTimer -= dt;
@@ -1079,3 +1293,4 @@ void executeChangePenSize(GameState& state, Block* block) {
 }
 
 }
+
