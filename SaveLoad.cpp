@@ -201,3 +201,201 @@ bool loadProject(GameState& state, const std::string& filename) {
     std::cout << "[SaveLoad] Project loaded from: " << filename << std::endl;
     return true;
 }
+
+
+
+
+// LOAD
+
+
+bool loadProject(GameState& state, const std::string& filename) {
+    std::ifstream file(filename);
+    if (!file.is_open()) {
+        std::cerr << "[SaveLoad] Failed to open file for reading: " << filename << "\n";
+        return false;
+    }
+
+    newProject(state);
+
+    std::string line;
+    std::string currentSection = "";
+    Sprite*     currentSprite  = nullptr;
+    int         expectedBlocks = 0;
+    int         readBlocks     = 0;
+    // 0=unread, 1=physical, 2=pen, 3=speech (per sprite)
+    int         spriteLineIdx  = 0;
+
+    while (std::getline(file, line)) {
+        // Trim \r\n
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n'))
+            line.pop_back();
+        if (line.empty()) continue;
+
+        //Section headers
+        if (line == "[HEADER]") {
+            currentSection = "HEADER";
+            continue;
+        }
+        if (line == "[VARIABLES]") {
+            currentSection = "VARIABLES";
+            continue;
+        }
+        if (line.size() > 8 && line.substr(0, 8) == "[SPRITE:") {
+            currentSection  = "SPRITE";
+            std::string name = unescapePipe(line.substr(8, line.size() - 9));
+            currentSprite   = new Sprite();
+            currentSprite->name = name;
+            state.sprites.push_back(currentSprite);
+            spriteLineIdx  = 0;
+            expectedBlocks = 0;
+            readBlocks     = 0;
+            continue;
+        }
+
+        // HEADER
+        if (currentSection == "HEADER")
+        {
+            size_t pipe = line.find('|');
+            if (pipe == std::string::npos) continue;
+            std::string key = line.substr(0, pipe);
+            std::string val = line.substr(pipe + 1);
+
+            if      (key == "activeSpriteIndex")   state.activeSpriteIndex   = std::stoi(val);
+            else if (key == "penExtensionEnabled")  state.penExtensionEnabled = (val == "1");
+            else if (key == "currentBackdrop")      state.currentBackdrop     = std::stoi(val);
+            continue;
+        }
+
+        // SPRITE
+        if (currentSection == "SPRITE" && currentSprite) {
+
+
+            if (line.size() > 10 && line.substr(0, 10) == "blockCount") {
+                try { expectedBlocks = std::stoi(line.substr(11)); } catch (...) {}
+                readBlocks = 0;
+                continue;
+            }
+
+
+            if (line.size() > 7 && line.substr(0, 7) == "[BLOCK]" && readBlocks < expectedBlocks)
+            {
+                std::string blockData = line.substr(7);
+                Block* block = deserializeBlock(blockData);
+                if (block) currentSprite->script.push_back(block);
+                ++readBlocks;
+                continue;
+            }
+
+            // Sprite
+            auto splitPipe = [&](const std::string& s)
+            {
+                std::vector<std::string> toks;
+                std::istringstream ss(s);
+                std::string tok;
+                while (std::getline(ss, tok, '|')) toks.push_back(tok);
+                return toks;
+            };
+
+
+            if (spriteLineIdx == 0)
+            {
+                auto t = splitPipe(line);
+                if (t.size() >= 8) {
+                    try {
+                        currentSprite->x              = std::stof(t[0]);
+                        currentSprite->y              = std::stof(t[1]);
+                        currentSprite->direction      = std::stof(t[2]);
+                        currentSprite->size           = std::stof(t[3]);
+                        currentSprite->visible        = (t[4] == "1");
+                        currentSprite->layer          = std::stoi(t[5]);
+                        currentSprite->draggable      = (t[6] == "1");
+                        currentSprite->currentCostume = std::stoi(t[7]);
+                        // Mirror to init values
+                        currentSprite->initX         = currentSprite->x;
+                        currentSprite->initY         = currentSprite->y;
+                        currentSprite->initDirection = currentSprite->direction;
+                        currentSprite->initSize      = currentSprite->size;
+                        currentSprite->initCostume   = currentSprite->currentCostume;
+                        spriteLineIdx = 1;
+                    } catch (...) {
+                        std::cerr << "[SaveLoad] Error parsing physical props\n";
+                    }
+                }
+            } else if (spriteLineIdx == 1) {
+                // Pen: 5 fields
+                auto t = splitPipe(line);
+                if (t.size() >= 5) {
+                    try {
+                        currentSprite->penDown      = (t[0] == "1");
+                        currentSprite->penColor.r   = (Uint8)std::stoi(t[1]);
+                        currentSprite->penColor.g   = (Uint8)std::stoi(t[2]);
+                        currentSprite->penColor.b   = (Uint8)std::stoi(t[3]);
+                        currentSprite->penSize       = std::stoi(t[4]);
+                        spriteLineIdx = 2;
+                    } catch (...) {
+                        std::cerr << "[SaveLoad] Error parsing pen props\n";
+                    }
+                }
+            } else if (spriteLineIdx == 2) {
+                // Speech: name|isThinker
+                size_t lastPipe = line.rfind('|');
+                if (lastPipe != std::string::npos) {
+                    currentSprite->speechText =
+                        unescapePipe(line.substr(0, lastPipe));
+                    currentSprite->isThinker  =
+                        (line.substr(lastPipe + 1) == "1");
+                    spriteLineIdx = 3; // done with fixed fields
+                }
+            }
+            continue;
+        }
+
+        // VARIABLES
+        if (currentSection == "VARIABLES") {
+            deserializeVariables(state, line);
+        }
+    }
+
+    file.close();
+    logInfo(state, "LOAD", "Project loaded from " + filename);
+    std::cout << "[SaveLoad] Project loaded from: " << filename << "\n";
+    return true;
+}
+
+
+
+
+void newProject(GameState& state) {
+    // Sprites
+    for (auto* s : state.sprites) delete s;
+    state.sprites.clear();
+    state.activeSpriteIndex = -1;
+
+    // Editor blocks
+    for (auto* b : state.editorBlocks) delete b;
+    state.editorBlocks.clear();
+
+
+    state.variables.clear();
+    state.functions.clear();
+    state.penStrokes.clear();
+    state.penStamps.clear();
+    state.logs.clear();
+    state.globalTimer       = 0.0f;
+    state.lastBroadcast     = "";
+    state.broadcastPending  = false;
+    state.waitingForAnswer  = false;
+    state.userAnswer        = "";
+
+
+    state.execCtx.pc            = 0;
+    state.execCtx.isRunning     = false;
+    state.execCtx.isPaused      = false;
+    state.execCtx.loopStack.clear();
+    state.execCtx.callStack.clear();
+    state.execCtx.waitingUntil  = false;
+
+    std::cout << "[SaveLoad] New project created\n";
+}
+
+} // namespace saveload
