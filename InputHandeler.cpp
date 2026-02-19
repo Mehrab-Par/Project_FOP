@@ -1,191 +1,272 @@
 #include "InputHandler.h"
+#include "Engine.h"
+#include "Logger.h"
+#include "UIManager.h"
 #include <iostream>
-#include <algorithm>
+#include <cmath>
 
 namespace Input {
 
-
-    bool pointInRect(int px, int py, float rx, float ry, float rw, float rh) {
-        return (px >= rx && px <= (rx + rw) && py >= ry && py <= (ry + rh));
-    }
-
-
-    int getToolboxBlockIndex(const GameState& state, int mx, int my) {
-        for (size_t i = 0; i < state.toolboxBlocks.size(); ++i) {
-            Block* b = state.toolboxBlocks[i];
-            if (pointInRect(mx, my, b->x, b->y, b->width, b->height)) {
-                return (int)i;
+void handleEvent(GameState& state, SDL_Event& event) {
+    switch (event.type) {
+        case SDL_MOUSEBUTTONDOWN:
+            handleMouseDown(state, event.button.x, event.button.y);
+            break;
+        case SDL_MOUSEBUTTONUP:
+            handleMouseUp(state, event.button.x, event.button.y);
+            break;
+        case SDL_MOUSEMOTION:
+            handleMouseMotion(state, event.motion.x, event.motion.y);
+            break;
+        case SDL_KEYDOWN:
+            handleKeyPress(state, event.key.keysym.sym);
+            break;
+        case SDL_TEXTINPUT:
+            if (state.askActive) {
+                state.askInput += event.text.text;
             }
-        }
-        return -1;
+            break;
+        default: break;
     }
+}
 
+void handleMouseDown(GameState& state, int x, int y) {
+    state.mouseX    = x;
+    state.mouseY    = y;
+    state.mousePressed = true;
 
-    //  MOUSE DOWN
+    // If ask dialog active, ignore all other interaction
+    if (state.askActive) return;
 
-    void handleMouseDown(GameState& state, const SDL_Event& event) {
-        int mx = event.button.x;
-        int my = event.button.y;
-        state.mouseDown = true;
-
-        std::cout << "Click at: " << mx << ", " << my << std::endl;
-
-        //  Control Buttons
-        Button clickedBtn = getButtonAt(state, mx, my);
-        if (clickedBtn != Button::NONE) {
-            std::cout << "Button action triggered." << std::endl;
-            switch (clickedBtn) {
-                case Button::PLAY:
-                    state.isRunningVM = true;
-                    std::cout << "VM Started" << std::endl;
-                    return;
-                case Button::STOP:
-                    state.isRunningVM = false;
-                    std::cout << "VM Stopped" << std::endl;
-                    return;
-                case Button::ADD_SPRITE:
-                    {
-
-                        Sprite* newSp = new Sprite();
-                        newSp->name = "Sprite " + std::to_string(state.sprites.size());
-                        newSp->x = 400;
-                        newSp->y = 300;
-                        state.sprites.push_back(newSp);
-                        std::cout << "New Sprite Added" << std::endl;
-                    }
-                    return;
-                default:
-                    break;
+    // ── Palette (left panel) ──────────────────────────────────────────────
+    const int CAT_TAB_H = 22;
+    const int palClickMinY = UILayout::MENU_H + CAT_TAB_H + 2;
+    if (x < state.paletteWidth && y > palClickMinY) {
+        // Find block accounting for scroll offset
+        // Each block's stored .y is its base position; rendered as y - paletteScrollY
+        Block* clicked = nullptr;
+        for (int i = (int)state.paletteBlocks.size()-1; i >= 0; i--) {
+            Block* b = state.paletteBlocks[i];
+            // category filter
+            if (state.paletteCategory >= 0 && (int)b->category != state.paletteCategory)
+                continue;
+            int drawY = b->y - state.paletteScrollY;
+            if (x >= b->x && x < b->x + b->width &&
+                y >= drawY  && y < drawY + b->height) {
+                clicked = b;
+                break;
             }
         }
 
+        if (clicked) {
+            int drawY = clicked->y - state.paletteScrollY;
+            // Clone the palette block into a new editor block
+            Block* nb = new Block();
+            nb->type        = clicked->type;
+            nb->category    = clicked->category;
+            nb->text        = clicked->text;
+            nb->numberValue = clicked->numberValue;
+            nb->stringValue = clicked->stringValue;
+            nb->width       = clicked->width;
+            nb->height      = clicked->height;
+            nb->x           = x;
+            nb->y           = y;
 
-        int tbIndex = getToolboxBlockIndex(state, mx, my);
-        if (tbIndex != -1) {
-            Block* tmpl = state.toolboxBlocks[tbIndex];
-
-
-            Block* newBlock = new Block();
-            newBlock->type = tmpl->type;
-            newBlock->text = tmpl->text;
-            newBlock->command = tmpl->command;
-            newBlock->color = tmpl->color;
-            newBlock->width = tmpl->width;
-            newBlock->height = tmpl->height;
-
-
-            newBlock->x = (float)mx - (tmpl->width / 2);
-            newBlock->y = (float)my - (tmpl->height / 2);
-
-            state.editorBlocks.push_back(newBlock);
-            state.draggedBlock = newBlock;
-            state.isDraggingBlock = true;
-            std::cout << "Block cloned from toolbox" << std::endl;
-            return;
+            state.draggedBlock        = nb;
+            state.draggingFromPalette = true;
+            state.dragOffsetX         = x - clicked->x;
+            state.dragOffsetY         = y - drawY;
+            Logger::info("Dragging new block: " + nb->text);
         }
-
-        for (auto it = state.editorBlocks.rbegin(); it != state.editorBlocks.rend(); ++it) {
-            Block* b = *it;
-            if (pointInRect(mx, my, b->x, b->y, b->width, b->height)) {
-                state.draggedBlock = b;
-                state.isDraggingBlock = true;
-                std::cout << "Dragging existing block" << std::endl;
-                return;
-            }
-        }
+        return;
     }
 
+    // ── Editor (centre panel) ─────────────────────────────────────────────
+    if (x >= state.editorX && x < state.stageX && y > 35) {
+        Block* clicked = findBlockAt(state.editorBlocks, x, y);
+        if (clicked) {
+            state.draggedBlock        = clicked;
+            state.draggingFromPalette = false;
+            state.dragOffsetX         = x - clicked->x;
+            state.dragOffsetY         = y - clicked->y;
+        }
+    }
+}
 
-    //  MOUSE UP
+void handleMouseUp(GameState& state, int x, int y) {
+    state.mousePressed = false;
+    if (!state.draggedBlock) return;
 
-    void handleMouseUp(GameState& state, const SDL_Event& event) {
-        state.mouseDown = false;
-
-        if (state.isDraggingBlock && state.draggedBlock != nullptr) {
-
-            if (state.draggedBlock->x < 250) {
-                auto it = std::find(state.editorBlocks.begin(), state.editorBlocks.end(), state.draggedBlock);
-                if (it != state.editorBlocks.end()) {
-                    state.editorBlocks.erase(it);
-                    delete state.draggedBlock; // آزادسازی حافظه
-                    std::cout << "Block deleted" << std::endl;
+    if (state.draggingFromPalette) {
+        // Only add to editor if dropped in editor zone
+        if (x >= state.editorX && x < state.stageX && y > 35) {
+            // Apply snap
+            Block* target = findSnapTarget(state);
+            if (target) {
+                if (state.snapAbove) {
+                    state.draggedBlock->y      = target->y - state.draggedBlock->height - 4;
+                    state.draggedBlock->nextBlock = target;
+                } else {
+                    state.draggedBlock->y      = target->y + target->height + 4;
+                    target->nextBlock          = state.draggedBlock;
                 }
-            } else {
-                std::cout << "Block placed" << std::endl;
+                state.draggedBlock->x = target->x;
             }
+            state.editorBlocks.push_back(state.draggedBlock);
+            Logger::info("Block added to editor: " + state.draggedBlock->text);
+        } else {
+            // Dropped outside editor — discard
+            delete state.draggedBlock;
+        }
+    } else {
+        // Moving an existing editor block: it stays in editorBlocks,
+        // just update position.
+        Block* target = findSnapTarget(state);
+        if (target && target != state.draggedBlock) {
+            if (state.snapAbove) {
+                state.draggedBlock->y      = target->y - state.draggedBlock->height - 4;
+                state.draggedBlock->nextBlock = target;
+            } else {
+                state.draggedBlock->y      = target->y + target->height + 4;
+                target->nextBlock          = state.draggedBlock;
+            }
+            state.draggedBlock->x = target->x;
+        }
 
-            state.draggedBlock = nullptr;
-            state.isDraggingBlock = false;
+        // If dropped back in palette, delete it from editor
+        if (x < state.paletteWidth) {
+            auto& eb = state.editorBlocks;
+            eb.erase(std::remove(eb.begin(), eb.end(), state.draggedBlock), eb.end());
+            delete state.draggedBlock;
         }
     }
 
+    state.draggedBlock = nullptr;
+    state.snapTarget   = nullptr;
+}
 
-    // MOUSE MOTION
+void handleMouseMotion(GameState& state, int x, int y) {
+    state.mouseX = x;
+    state.mouseY = y;
 
-    void handleMouseMotion(GameState& state, const SDL_Event& event) {
-        state.mouseX = event.motion.x;
-        state.mouseY = event.motion.y;
+    if (state.draggedBlock) {
+        state.draggedBlock->x = x - state.dragOffsetX;
+        state.draggedBlock->y = y - state.dragOffsetY;
 
-        if (state.isDraggingBlock && state.draggedBlock != nullptr) {
-            state.draggedBlock->x = (float)state.mouseX - (state.draggedBlock->width / 2);
-            state.draggedBlock->y = (float)state.mouseY - (state.draggedBlock->height / 2);
+        if (x >= state.editorX && x < state.stageX)
+            state.snapTarget = findSnapTarget(state);
+        else
+            state.snapTarget = nullptr;
+    }
+}
+
+void handleKeyPress(GameState& state, SDL_Keycode key) {
+    // Ask dialog: handle typing
+    if (state.askActive) {
+        if (key == SDLK_RETURN || key == SDLK_KP_ENTER) {
+            // Submit answer
+            state.askActive = false;
+            SDL_StopTextInput();
+            Logger::info("Ask answered: " + state.askInput);
+        } else if (key == SDLK_BACKSPACE && !state.askInput.empty()) {
+            state.askInput.pop_back();
+        }
+        return;
+    }
+
+    switch (key) {
+        case SDLK_SPACE:
+            if (state.exec.running) {
+                state.exec.paused = !state.exec.paused;
+                Logger::info(state.exec.paused ? "Paused" : "Resumed");
+            } else {
+                state.greenFlagClicked = true;
+            }
+            break;
+
+        case SDLK_s:
+            // Step mode toggle
+            state.stepMode = !state.stepMode;
+            Logger::info(state.stepMode ? "Step mode ON" : "Step mode OFF");
+            break;
+
+        case SDLK_n:
+            if (state.stepMode && state.exec.paused) {
+                state.stepNext = true;
+            }
+            break;
+
+        case SDLK_DELETE:
+        case SDLK_BACKSPACE: {
+            // Delete selected blocks from editor
+            auto& eb = state.editorBlocks;
+            for (int i = (int)eb.size()-1; i >= 0; i--) {
+                if (eb[i]->selected) {
+                    delete eb[i];
+                    eb.erase(eb.begin() + i);
+                }
+            }
+            break;
+        }
+
+        case SDLK_b:
+            // Cycle background colour
+            state.currentColorIndex = (state.currentColorIndex + 1) % (int)state.stageColors.size();
+            state.stageColor = state.stageColors[state.currentColorIndex].color;
+            Logger::info("Background: " + state.stageColors[state.currentColorIndex].name);
+            break;
+
+        case SDLK_c:
+            // Next costume for selected sprite
+            if (state.selectedSpriteIndex >= 0 &&
+                state.selectedSpriteIndex < (int)state.sprites.size()) {
+                Sprite* sp = state.sprites[state.selectedSpriteIndex];
+                if (!sp->costumes.empty())
+                    sp->currentCostume = (sp->currentCostume + 1) % (int)sp->costumes.size();
+            }
+            break;
+
+        default: break;
+    }
+}
+
+Block* findBlockAt(const std::vector<Block*>& blocks, int x, int y) {
+    for (int i = (int)blocks.size()-1; i >= 0; i--) {
+        Block* b = blocks[i];
+        if (x >= b->x && x < b->x + b->width &&
+            y >= b->y && y < b->y + b->height)
+            return b;
+    }
+    return nullptr;
+}
+
+Block* findSnapTarget(GameState& state) {
+    if (!state.draggedBlock) return nullptr;
+    const int SNAP_DIST = 28;
+    Block* best = nullptr;
+    float  minD = 999999.0f;
+
+    for (Block* target : state.editorBlocks) {
+        if (target == state.draggedBlock) continue;
+
+        if (std::abs(target->x - state.draggedBlock->x) >= 50) continue;
+
+        // Snap below target
+        int distBelow = std::abs((target->y + target->height + 4) - state.draggedBlock->y);
+        if (distBelow < SNAP_DIST && distBelow < minD) {
+            minD  = (float)distBelow;
+            best  = target;
+            state.snapAbove = false;
+        }
+        // Snap above target
+        int distAbove = std::abs((target->y - state.draggedBlock->height - 4) - state.draggedBlock->y);
+        if (distAbove < SNAP_DIST && distAbove < minD) {
+            minD  = (float)distAbove;
+            best  = target;
+            state.snapAbove = true;
         }
     }
+    return best;
+}
 
-
-
-    void handleKeyDown(GameState& state, const SDL_Event& event) {
-
-    }
-
-    void handleTextInput(GameState& state, const SDL_Event& event) {
-
-    }
-
-
-    //  HANDLE EVENT
-
-    void handleEvent(GameState& state, SDL_Event& event) {
-        switch (event.type) {
-            case SDL_QUIT:
-                state.running = false;
-                break;
-            case SDL_MOUSEBUTTONDOWN:
-                handleMouseDown(state, event);
-                break;
-            case SDL_MOUSEBUTTONUP:
-                handleMouseUp(state, event);
-                break;
-            case SDL_MOUSEMOTION:
-                handleMouseMotion(state, event);
-                break;
-            case SDL_KEYDOWN:
-                handleKeyDown(state, event);
-                break;
-            case SDL_TEXTINPUT:
-                handleTextInput(state, event);
-                break;
-        }
-    }
-
-
-
-    Button getButtonAt(const GameState& state, int mx, int my) {
-
-        if (pointInRect(mx, my, 800, 10, 50, 50)) return Button::PLAY;
-        if (pointInRect(mx, my, 860, 10, 50, 50)) return Button::STOP;
-        if (pointInRect(mx, my, 920, 10, 50, 50)) return Button::ADD_SPRITE;
-
-        return Button::NONE;
-    }
-
-    bool isOverStage(const GameState& state, int mx, int my) {
-        return pointInRect(mx, my, state.stageX, 0, state.stageWidth, 600);
-    }
-
-    int getSpriteAtPoint(const GameState& state, int mx, int my) {
-
-        return -1;
-    }
-
-} // end namespace Input
+}
