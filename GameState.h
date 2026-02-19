@@ -1,406 +1,251 @@
-
 #pragma once
 #include <string>
 #include <vector>
-#include <unordered_map>
-#include <functional>
+#include <map>
 #include <SDL2/SDL.h>
-#include <SDL2/SDL_image.h>
-#include <SDL2/SDL_mixer.h>
 
 
+// Block types  (all Scratch categories)
 
-struct Value {
-    enum Type { DOUBLE, STRING, BOOL } type;
-
-    double doubleVal;
-    std::string stringVal;
-    bool boolVal;
-
-    // سازنده‌ها - دقیقاً مثل variant کار میکنه
-    Value() : type(DOUBLE), doubleVal(0) {}
-    Value(double v) : type(DOUBLE), doubleVal(v) {}
-    Value(int v) : type(DOUBLE), doubleVal(v) {}
-    Value(const std::string& v) : type(STRING), stringVal(v) {}
-    Value(const char* v) : type(STRING), stringVal(v) {}
-    Value(bool v) : type(BOOL), boolVal(v) {}
-
-    // کپی سازنده و عملگر =
-    Value(const Value& other) {
-        type = other.type;
-        switch (type) {
-            case DOUBLE: doubleVal = other.doubleVal; break;
-            case STRING: new(&stringVal) std::string(other.stringVal); break;
-            case BOOL: boolVal = other.boolVal; break;
-        }
-    }
-
-    ~Value() {
-        if (type == STRING) {
-            stringVal.~basic_string();
-        }
-    }
-
-    Value& operator=(const Value& other) {
-        if (this == &other) return *this;
-        if (type == STRING) stringVal.~basic_string();
-        type = other.type;
-        switch (type) {
-            case DOUBLE: doubleVal = other.doubleVal; break;
-            case STRING: new(&stringVal) std::string(other.stringVal); break;
-            case BOOL: boolVal = other.boolVal; break;
-        }
-        return *this;
-    }
-};
-
-// توابع تبدیل - دقیقاً مثل قبل کار میکنن
-inline double toDouble(const Value& v) {
-    switch (v.type) {
-        case Value::DOUBLE: return v.doubleVal;
-        case Value::BOOL:   return v.boolVal ? 1.0 : 0.0;
-        case Value::STRING:
-            try { return std::stod(v.stringVal); }
-            catch (...) { return 0.0; }
-    }
-    return 0.0;
-}
-
-inline std::string toString(const Value& v) {
-    switch (v.type) {
-        case Value::STRING: return v.stringVal;
-        case Value::DOUBLE: {
-            double d = v.doubleVal;
-            if (d == (int)d) return std::to_string((int)d);
-            return std::to_string(d);
-        }
-        case Value::BOOL: return v.boolVal ? "true" : "false";
-    }
-    return "";
-}
-
-inline bool toBool(const Value& v) {
-    switch (v.type) {
-        case Value::BOOL:   return v.boolVal;
-        case Value::DOUBLE: return v.doubleVal != 0.0;
-        case Value::STRING: return !v.stringVal.empty();
-    }
-    return false;
-}
-// ─────────────────────────────────────────────
-// Forward Declarations
-// ─────────────────────────────────────────────
-struct Block;
-struct Sprite;
-struct GameState;
-
-
-// ─────────────────────────────────────────────
-// Block Types Enum
-// ─────────────────────────────────────────────
-enum class BlockType {
+enum BlockType {
     // Motion (blue)
-    Move, TurnLeft, TurnRight, GoTo, ChangeX, ChangeY,
-    SetX, SetY, PointInDirection, GoToRandom, GoToMouse,
-    BounceOffEdge,
-
-    // Looks (indigo)
-    Say, SayForTime, Think, ThinkForTime,
-    SwitchCostume, NextCostume,
-    SwitchBackdrop, NextBackdrop,
-    ChangeSize, SetSize,
-    ChangeGraphicEffect, SetGraphicEffect, ClearGraphicEffects,
-    Show, Hide,
-    GoToFrontLayer, GoToBackLayer, MoveLayerForward, MoveLayerBackward,
-
-    // Sound (purple)
-    PlaySound, PlaySoundUntilDone, StopAllSounds, SetVolume, ChangeVolume,
-
+    BLOCK_Move, BLOCK_TurnRight, BLOCK_TurnLeft,
+    BLOCK_GoToXY, BLOCK_SetX, BLOCK_SetY,
+    BLOCK_ChangeX, BLOCK_ChangeY,
+    BLOCK_PointDirection, BLOCK_BounceOffEdge,
+    BLOCK_GoToMousePointer, BLOCK_GoToRandomPosition,
+    // Looks (purple)
+    BLOCK_Say, BLOCK_SayForSecs, BLOCK_Think, BLOCK_ThinkForSecs,
+    BLOCK_Show, BLOCK_Hide,
+    BLOCK_SwitchCostume, BLOCK_NextCostume,
+    BLOCK_SwitchBackdrop, BLOCK_NextBackdrop,
+    BLOCK_SetSize, BLOCK_ChangeSize,
+    BLOCK_SetColorEffect, BLOCK_ChangeColorEffect, BLOCK_ClearGraphicEffects,
+    BLOCK_SetGhostEffect,BLOCK_ChangeGhostEffect,
+    BLOCK_SetBrightnessEffect, BLOCK_ChangeBrightnessEffect,
+    BLOCK_SetSaturationEffect, BLOCK_ChangeSaturationEffect,
+    BLOCK_GoToFrontLayer, BLOCK_GoToBackLayer,
+    BLOCK_GoForwardLayers, BLOCK_GoBackwardLayers,
+    // Sound (magenta)
+    BLOCK_PlaySound, BLOCK_PlaySoundUntilDone, BLOCK_StopAllSounds,
+    BLOCK_SetVolume, BLOCK_ChangeVolume,
     // Events (yellow)
-    WhenGreenFlagClicked, WhenKeyPressed, WhenSpriteClicked, WhenBroadcast,
-    Broadcast,
-
+    BLOCK_WhenFlagClicked, BLOCK_WhenKeyPressed, BLOCK_WhenSpriteClicked,
+    BLOCK_Broadcast, BLOCK_BroadcastAndWait, BLOCK_WhenReceive,
     // Control (orange)
-    Wait, Repeat, Forever, IfThen, IfThenElse,
-    WaitUntil, RepeatUntil, StopAll,
-    EndRepeat, EndForever, EndIf, Else,
-
+    BLOCK_Wait, BLOCK_WaitUntil,
+    BLOCK_Repeat, BLOCK_Forever,
+    BLOCK_If, BLOCK_IfElse, BLOCK_Stop, BLOCK_RepeatUntil,
     // Sensing (cyan)
-    TouchingMouse, TouchingEdge, TouchingSprite,
-    DistanceToMouse, DistanceToSprite,
-    Ask, Answer,
-    KeyPressed, MouseDown, MouseX, MouseY,
-    SetDragMode, Timer, ResetTimer,
-
+    BLOCK_Touching, BLOCK_TouchingColor, BLOCK_ColorTouching,
+    BLOCK_DistanceTo, BLOCK_AskWait, BLOCK_Answer,
+    BLOCK_KeyPressed, BLOCK_MouseDown,
+    BLOCK_MouseX, BLOCK_MouseY,
+    BLOCK_SetDragMode,
+    BLOCK_Timer, BLOCK_ResetTimer,
     // Operators (green)
-    Add, Subtract, Multiply, Divide,
-    Equal, LessThan, GreaterThan,
-    And, Or, Not,
-    StringLength, StringAt, StringJoin,
-    Modulo, Abs, Sqrt, Floor, Ceiling, Sin, Cos, Xor,
-
-    // Variables
-    SetVariable, ChangeVariable, ShowVariable, HideVariable,
-
-    // Custom functions
-    DefineFunction, CallFunction,
-
-    // Pen Extension (dark green)
-    PenUp, PenDown, Stamp, EraseAll,
-    SetPenColor, ChangePenColor, SetPenSize, ChangePenSize,
-
-    // Reporters (return values)
-    ReporterCostumeNumber, ReporterBackdropNumber, ReporterSize,
-
-    // Literal / Input node (not a real block — holds a value)
-    Literal,
-
-    None
+    BLOCK_Add, BLOCK_Subtract, BLOCK_Multiply, BLOCK_Divide,
+    BLOCK_Random, BLOCK_LessThan, BLOCK_Equal, BLOCK_GreaterThan,
+    BLOCK_And, BLOCK_Or, BLOCK_Not,
+    BLOCK_Join, BLOCK_LetterOf, BLOCK_LengthOf,
+    BLOCK_Mod, BLOCK_Round, BLOCK_Abs, BLOCK_Sqrt,
+    BLOCK_Floor, BLOCK_Ceiling, BLOCK_Sin, BLOCK_Cos,
+    // Variables (orange-red)
+    BLOCK_SetVariable, BLOCK_ChangeVariable,
+    BLOCK_ShowVariable, BLOCK_HideVariable,
+    // Pen extension (dark green)
+    BLOCK_PenClear, BLOCK_PenDown, BLOCK_PenUp,
+    BLOCK_SetPenColor, BLOCK_SetPenSize, BLOCK_ChangePenSize,
+    BLOCK_SetPenColorEffect, BLOCK_ChangePenColorEffect,
+    BLOCK_Stamp,
+    // Internal
+    BLOCK_Literal,
+    BLOCK_None
 };
 
-// ─────────────────────────────────────────────
-// Block Structure
-// ─────────────────────────────────────────────
+enum BlockCategory {
+    CAT_MOTION, CAT_LOOKS, CAT_SOUND, CAT_EVENTS,
+    CAT_CONTROL, CAT_SENSING, CAT_OPERATORS,
+    CAT_VARIABLES, CAT_PEN
+};
+
+
+// Block node
+
 struct Block {
-    BlockType type = BlockType::None;
-
-    // Parameters (child expression blocks or literal values)
-    std::vector<Block*> params;   // e.g. params[0] = amount for Move
-
-    // For control structures: jump target line after pre-processing
-    int jumpTarget = -1;          // e.g. If → EndIf line
-    int elseTarget = -1;          // for IfElse → Else line
-
-    // For literal / input nodes
-    Value literalValue;
-
-    // For named references (variable name, costume name, sound name, etc.)
-    std::string name;
-
-    // For custom function definition
-    std::vector<std::string> paramNames;   // parameter names
-    std::vector<Block*> body;              // body blocks of the function
-
-    // Debug / source info
-    int sourceLine = -1;
-
-    // UI positioning (for drag & drop editor)
-    int uiX = 0, uiY = 0;
-    bool selected = false;
-
+    BlockType    type;
+    BlockCategory category;
+    std::string  text;
+    std::vector<Block*> inputs;   // expression inputs
+    std::string  stringValue;
+    double       numberValue;
+    int x, y, width, height;
+    Block* nextBlock;             // next sibling in sequence
+    std::vector<Block*> nested;   // if-body / repeat-body
+    std::vector<Block*> nested2;  // else-body (IfElse only)
+    bool selected, isDragging;
+    // Pre-scan jump targets (indices into flat editorBlocks)
+    int jumpTarget;
+    int elseTarget;
+    Block();
     ~Block();
 };
 
-// ─────────────────────────────────────────────
-// Costume
-// ─────────────────────────────────────────────
+
+// Costume / Sprite
+
 struct Costume {
-    std::string name;
-    SDL_Surface* surface = nullptr;
-    SDL_Texture* texture = nullptr;
-    int width = 64, height = 64;
+    std::string  name;
+    SDL_Texture* texture;
+    int width, height;
+    Costume();
 };
 
-// ─────────────────────────────────────────────
-// Sound
-// ─────────────────────────────────────────────
-struct Sound {
-    std::string name;
-    Mix_Chunk* chunk = nullptr;
-    int volume = 100;   // 0–100
-    bool muted = false;
-    int channel = -1;   // SDL_mixer channel (-1 = not playing)
-};
-
-// ─────────────────────────────────────────────
-// Sprite
-// ─────────────────────────────────────────────
 struct Sprite {
     std::string name;
-
-    // Position & transform
-    float x = 0.0f, y = 0.0f;
-    float direction = 90.0f;   // degrees: 90 = right, 0 = up
-    float size = 100.0f;       // percentage
-    bool visible = true;
-    int layer = 0;
-    bool draggable = false;
-
-    // Costumes
+    float x, y, direction, size; // size in %
+    bool  visible;
+    int   layer;
     std::vector<Costume> costumes;
-    int currentCostume = 0;
-
-    // Sounds
-    std::vector<Sound> sounds;
-
-    // Speech bubble
-    std::string speechText;
-    bool isThinker = false;    // think vs say
-    float speechTimer = -1.0f; // -1 = permanent, else seconds remaining
-
-    // Graphic effects
-    float colorEffect = 0.0f;
-
-    // Script (list of blocks for this sprite)
-    std::vector<Block*> script;
-
-    // Pen state
-    bool penDown = false;
-    SDL_Color penColor = {0, 0, 255, 255};
-    int penSize = 1;
-    float penSaturation = 100.0f;
-    float penBrightness = 100.0f;
-
-    // Initial state (for reset)
-    float initX = 0.0f, initY = 0.0f;
-    float initDirection = 90.0f;
-    float initSize = 100.0f;
-    int initCostume = 0;
-
+    int   currentCostume;
+    // Speech
+    std::string sayText;
+    bool  isThinking;
+    float sayTimer;      // > 0 = timed, -1 = permanent
+    // Pen
+    bool      penDown;
+    SDL_Color penColor;
+    int       penSize;
+    // Looks effects
+    float colorEffect;   // 0-360 hue shift
+    float ghostEffect;   // 0-100 transparency
+    float brightnessEffect;    // 0-100 brightness
+    float saturationEffect;    //0-100 saturation
+    // Sensing / interaction
+    bool  isDraggable;
+    std::string answer; // last ask-answer
+    // Scripts attached to this sprite
+    std::vector<Block*> scripts;
+    Sprite();
     ~Sprite();
 };
 
-// ─────────────────────────────────────────────
-// Logger
-// ─────────────────────────────────────────────
-enum class LogLevel { INFO, WARNING, ERROR_LVL };
+// Pen layer
 
-struct LogEntry {
-    int cycle;
-    int line;
-    std::string command;
-    std::string operation;
-    std::string data;
-    LogLevel level;
-};
-
-// ─────────────────────────────────────────────
-// Execution Context (per-sprite runtime state)
-// ─────────────────────────────────────────────
-struct ExecutionContext {
-    int pc = 0;                          // program counter
-    std::vector<int> loopStack;          // repeat counters
-    std::vector<int> loopReturnStack;    // where to jump back
-    bool isRunning = false;
-    bool isPaused = false;
-    bool isDebugMode = false;
-    bool waitingForStep = false;         // step-by-step mode
-    float waitTimer = 0.0f;             // for Wait blocks
-    bool waitingUntil = false;
-
-    // Custom function call stack
-    struct CallFrame {
-        int returnPC;
-        std::unordered_map<std::string, Value> localVars;
-    };
-    std::vector<CallFrame> callStack;
-
-    int watchdogCounter = 0;
-    static const int WATCHDOG_MAX = 10000;
-};
-
-// ─────────────────────────────────────────────
-// Backdrop
-// ─────────────────────────────────────────────
-struct Backdrop {
-    std::string name;
-    SDL_Surface* surface = nullptr;
-    SDL_Texture* texture = nullptr;
-};
-
-// ─────────────────────────────────────────────
-// Pen Drawing Record
-// ─────────────────────────────────────────────
 struct PenStroke {
-    float x1, y1, x2, y2;
+    std::vector<SDL_Point> points;
     SDL_Color color;
     int size;
+    PenStroke();
 };
 
-struct PenStamp {
-    SDL_Texture* texture = nullptr;
-    float x, y;
-    float size;
+
+// Per-sprite execution context
+
+struct SpriteExecCtx {
+    int  pc;                        // index into editorBlocks for THIS sprite
+    std::vector<int>  loopCount;    // repeat counter stack
+    std::vector<int>  loopStart;    // loop-start pc stack
+    float waitTimer;                // seconds remaining in a wait
+    bool  waitUntilActive;
+    bool  askWaiting;
+    bool  finished;
+    SpriteExecCtx();
 };
 
-// ─────────────────────────────────────────────
-// Custom Function Definition
-// ─────────────────────────────────────────────
-struct FunctionDef {
-    std::string name;
-    std::vector<std::string> paramNames;
-    std::vector<Block*> body;
+
+// Global execution context
+
+struct ExecutionContext {
+    bool running;
+    bool paused;
+    std::map<Sprite*, SpriteExecCtx> ctx; // one ctx per sprite
+    float globalTimer;
+    std::string pendingBroadcast;
+    ExecutionContext();
 };
 
-// ─────────────────────────────────────────────
-// Main Game State
-// ─────────────────────────────────────────────
+
+// GameState
+
+struct StageColor { std::string name; SDL_Color color; };
+
 struct GameState {
-    // SDL
-    SDL_Window* window = nullptr;
-    SDL_Renderer* renderer = nullptr;
-    int windowWidth = 1280;
-    int windowHeight = 720;
+    SDL_Window*   window;
+    SDL_Renderer* renderer;
 
-    // Stage / scene area
-    int stageX = 260, stageY = 10;
-    int stageWidth = 480, stageHeight = 360;
+    int windowWidth, windowHeight;
+
+    // Layout zones (computed from UIManager constants)
+    int stageX, stageY, stageWidth, stageHeight;
+    int paletteWidth, editorX, editorWidth;
+
+    // Background
+    SDL_Color stageColor;
+    SDL_Texture* backdropTexture;
+    std::vector<StageColor> stageColors;
+    int currentColorIndex;
 
     // Sprites
     std::vector<Sprite*> sprites;
-    int activeSpriteIndex = -1;
+    int selectedSpriteIndex;
 
-    // Backdrops
-    std::vector<Backdrop> backdrops;
-    int currentBackdrop = 0;
+    // Variables (dynamic typed: stored as string, interpreted as needed)
+    std::map<std::string, std::string> variables;
+    std::map<std::string, bool>        variableVisible;
 
-    // Global variables
-    std::unordered_map<std::string, Value> variables;
+    // Execution engine
+    ExecutionContext exec;
 
-    // Custom functions
-    std::unordered_map<std::string, FunctionDef> functions;
-
-    // Execution
-    ExecutionContext execCtx;
-    int globalCycle = 0;
-
-    // Logger
-    std::vector<LogEntry> logs;
-    bool showLogs = false;
-
-    // Pen drawings
+    // Pen layer
     std::vector<PenStroke> penStrokes;
-    std::vector<PenStamp> penStamps;
+    PenStroke currentStroke;
+    bool      isDrawingStroke;
 
-    // Broadcast system
-    std::string lastBroadcast;
-    bool broadcastPending = false;
+    // Block palette (left panel, never executed directly)
+    std::vector<Block*> paletteBlocks;
 
-    // Input state
-    std::string userAnswer;
-    bool waitingForAnswer = false;
+    // Editor (centre panel, user-assembled script)
+    std::vector<Block*> editorBlocks; // top-level blocks only
+
+    // Drag & drop
+    Block* draggedBlock;
+    int    dragOffsetX, dragOffsetY;
+    bool   draggingFromPalette;
+    Block* snapTarget;
+    bool   snapAbove;
+
+    // Input snapshot
+    int  mouseX, mouseY;
+    bool mousePressed;
+    bool greenFlagClicked, stopClicked;
+
+    // Safety: watchdog counter
+    int watchdogCounter;
+    static const int WATCHDOG_LIMIT = 2000;
+
+    // Debug step-mode
+    bool stepMode;
+    bool stepNext;
+
+    // Palette category filter (-1 = all)
+    int paletteCategory;
+    // Palette scroll offset in pixels
+    int paletteScrollY;
+
+    // Audio
+    bool globalMute;
+    int  globalVolume; // 0-100
+
+    // Ask/answer overlay
+    bool        askActive;
     std::string askQuestion;
+    std::string askInput;     // typed so far
+    Sprite*     askSprite;    // which sprite asked
 
-    // Timer
-    float globalTimer = 0.0f;
+    // Pen extension active?
+    bool penExtensionActive;
 
-    // Mouse state
-    int mouseX = 0, mouseY = 0;
-    bool mouseDown = false;
-
-    // UI state
-    enum class UIPanel { NONE, CODE, COSTUMES, SOUNDS, SETTINGS, EXTENSIONS };
-    UIPanel activePanel = UIPanel::CODE;
-    bool penExtensionEnabled = false;
-    bool showVariableMonitors = true;
-
-    // Block editor state
-    std::vector<Block*> editorBlocks;   // blocks placed in the code editor
-    Block* draggedBlock = nullptr;
-    int dragOffsetX = 0, dragOffsetY = 0;
-
-    // Pen editor
-    bool inPaintMode = false;
-
+    GameState();
     ~GameState();
 };

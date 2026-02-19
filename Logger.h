@@ -1,30 +1,15 @@
-
-
 #pragma once
-#include "GameState.h"
 #include <string>
+#include <fstream>
+#include <iostream>
 
-// ─────────────────────────────────────────────
-// Logger — "Black Box" system
-// ─────────────────────────────────────────────
 namespace Logger {
-    void logEvent(GameState& state, LogLevel level, int line,
-                  const std::string& cmd, const std::string& op,
-                  const std::string& data);
+    enum class Level { INFO, WARNING, ERROR_LVL };
 
-    void logInfo(GameState& state, int line,
-                 const std::string& cmd, const std::string& op,
-                 const std::string& data);
-
-    void logWarning(GameState& state, int line,
-                    const std::string& cmd, const std::string& op,
-                    const std::string& data);
-
-    void logError(GameState& state, int line,
-                  const std::string& cmd, const std::string& op,
-                  const std::string& data);
-
-    void clearLogs(GameState& state);
-    void exportLogsToFile(GameState& state, const std::string& filename);
-    std::string levelToString(LogLevel level);
+    void init(const std::string& filename = "scratch.log");
+    void log(Level level, const std::string& message);
+    void info(const std::string& msg);
+    void warning(const std::string& msg);
+    void error(const std::string& msg);
+    void close();
 }

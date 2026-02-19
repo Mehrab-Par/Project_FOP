@@ -1,78 +1,51 @@
 #include "Logger.h"
-#include <iostream>
-#include <fstream>
-#include <iomanip>
+#include <ctime>
 
 namespace Logger {
+    static std::ofstream logFile;
+    static bool initialized = false;
 
-std::string levelToString(LogLevel level) {
-    switch (level) {
-        case LogLevel::INFO:      return "INFO";
-        case LogLevel::WARNING:   return "WARNING";
-        case LogLevel::ERROR_LVL: return "ERROR";
+    std::string getTime() {
+        time_t now = time(0);
+        char buf[80];
+        strftime(buf, 80, "%Y-%m-%d %H:%M:%S", localtime(&now));
+        return buf;
     }
-    return "UNKNOWN";
-}
 
-void logEvent(GameState& state, LogLevel level, int line,
-              const std::string& cmd, const std::string& op,
-              const std::string& data) {
-    LogEntry entry;
-    entry.cycle    = state.globalCycle;
-    entry.line     = line;
-    entry.command  = cmd;
-    entry.operation = op;
-    entry.data     = data;
-    entry.level    = level;
-    state.logs.push_back(entry);
-
-    // Also print to console
-    std::cout << "[Cycle:" << std::setw(5) << entry.cycle << "]"
-              << " [Line:" << std::setw(3) << entry.line << "]"
-              << " [" << levelToString(level) << "]"
-              << " [CMD:" << cmd << "]"
-              << " -> " << op << " | " << data
-              << std::endl;
-}
-
-void logInfo(GameState& state, int line,
-             const std::string& cmd, const std::string& op,
-             const std::string& data) {
-    logEvent(state, LogLevel::INFO, line, cmd, op, data);
-}
-
-void logWarning(GameState& state, int line,
-                const std::string& cmd, const std::string& op,
-                const std::string& data) {
-    logEvent(state, LogLevel::WARNING, line, cmd, op, data);
-}
-
-void logError(GameState& state, int line,
-              const std::string& cmd, const std::string& op,
-              const std::string& data) {
-    logEvent(state, LogLevel::ERROR_LVL, line, cmd, op, data);
-}
-
-void clearLogs(GameState& state) {
-    state.logs.clear();
-}
-
-void exportLogsToFile(GameState& state, const std::string& filename) {
-    std::ofstream file(filename);
-    if (!file.is_open()) {
-        std::cerr << "[Logger] Failed to open file: " << filename << std::endl;
-        return;
+    void init(const std::string& filename) {
+        logFile.open(filename, std::ios::app);
+        if (logFile.is_open()) {
+            initialized = true;
+            info("Logger started");
+        }
     }
-    for (const auto& entry : state.logs) {
-        file << "[Cycle:" << entry.cycle << "]"
-             << " [Line:" << entry.line << "]"
-             << " [" << levelToString(entry.level) << "]"
-             << " [CMD:" << entry.command << "]"
-             << " -> " << entry.operation << " | " << entry.data
-             << "\n";
-    }
-    file.close();
-    std::cout << "[Logger] Logs exported to: " << filename << std::endl;
-}
 
+    void log(Level level, const std::string& message) {
+        std::string prefix;
+        switch(level) {
+            case Level::INFO: prefix = "[INFO] "; break;
+            case Level::WARNING: prefix = "[WARN] "; break;
+            case Level::ERROR_LVL: prefix = "[ERROR] "; break;
+        }
+
+        std::string msg = getTime() + " " + prefix + message;
+        std::cout << msg << std::endl;
+
+        if (initialized && logFile.is_open()) {
+            logFile << msg << std::endl;
+            logFile.flush();
+        }
+    }
+
+    void info(const std::string& msg) { log(Level::INFO, msg); }
+    void warning(const std::string& msg) { log(Level::WARNING, msg); }
+    void error(const std::string& msg) { log(Level::ERROR_LVL, msg); }
+
+    void close() {
+        if (initialized) {
+            info("Logger closing");
+            logFile.close();
+            initialized = false;
+        }
+    }
 }

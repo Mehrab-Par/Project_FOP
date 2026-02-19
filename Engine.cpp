@@ -1,1296 +1,884 @@
 #include "Engine.h"
 #include "Logger.h"
+#include <SDL2/SDL_mixer.h>
 #include <cmath>
-#include <algorithm>
-#include <cstdlib>
 #include <iostream>
 #include <sstream>
+#include <algorithm>
 
-// ─────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────
-static Sprite* getActiveSprite(GameState& state) {
-    if (state.activeSpriteIndex >= 0 &&
-        state.activeSpriteIndex < (int)state.sprites.size())
-        return state.sprites[state.activeSpriteIndex];
-    return nullptr;
-}
-
-static const float DEG_TO_RAD = 3.14159265358979323846f / 180.0f;
-
-static float wrapAngle(float angle) {
-    while (angle < 0.0f)   angle += 360.0f;
-    while (angle >= 360.0f) angle -= 360.0f;
-    return angle;
-}
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 namespace Engine {
-    // CORE LIFECYCLE
 
-void engineInit(GameState& state) {
-    state.execCtx.pc          = 0;
-    state.execCtx.isRunning   = false;
-    state.execCtx.isPaused    = false;
-    state.execCtx.isDebugMode = false;
-    state.execCtx.loopStack.clear();
-    state.execCtx.loopReturnStack.clear();
-    state.execCtx.callStack.clear();
-    state.execCtx.watchdogCounter = 0;
-    state.globalCycle = 0;
-    Logger::logInfo(state, 0, "ENGINE", "Init", "Engine initialized");
-}
-
-void startExecution(GameState& state) {
-    Sprite* sprite = getActiveSprite(state);
-    if (!sprite || sprite->script.empty()) {
-        Logger::logWarning(state, 0, "ENGINE", "Start", "No script to run");
-        return;
-    }
-    // Flatten script into editorBlocks for indexed execution
-    state.editorBlocks = sprite->script;
-    preProcessBlocks(state, state.editorBlocks);
-
-    state.execCtx.pc        = 0;
-    state.execCtx.isRunning = true;
-    state.execCtx.isPaused  = false;
-    state.execCtx.loopStack.clear();
-    state.execCtx.loopReturnStack.clear();
-    state.execCtx.callStack.clear();
-    state.execCtx.watchdogCounter = 0;
-    Logger::clearLogs(state);
-    Logger::logInfo(state, 0, "ENGINE", "Start", "Execution started");
-}
-
-void stopExecution(GameState& state) {
-    state.execCtx.isRunning = false;
-    state.execCtx.pc        = 0;
-    state.execCtx.loopStack.clear();
-    state.execCtx.loopReturnStack.clear();
-    state.execCtx.callStack.clear();
-    Logger::logInfo(state, state.execCtx.pc, "ENGINE", "Stop", "Execution stopped");
-}
-
-void pauseExecution(GameState& state) {
-    state.execCtx.isPaused = true;
-    Logger::logInfo(state, state.execCtx.pc, "ENGINE", "Pause", "Execution paused at PC=" + std::to_string(state.execCtx.pc));
-}
-
-void resumeExecution(GameState& state) {
-    state.execCtx.isPaused = false;
-    Logger::logInfo(state, state.execCtx.pc, "ENGINE", "Resume", "Execution resumed from PC=" + std::to_string(state.execCtx.pc));
-}
-
-void engineReset(GameState& state) {
-    stopExecution(state);
-    // Reset all sprites to initial state
-    for (auto* sprite : state.sprites) {
-        sprite->x              = sprite->initX;
-        sprite->y              = sprite->initY;
-        sprite->direction      = sprite->initDirection;
-        sprite->size           = sprite->initSize;
-        sprite->currentCostume = sprite->initCostume;
-        sprite->visible        = true;
-        sprite->speechText     = "";
-        sprite->speechTimer    = -1.0f;
-    }
-    state.penStrokes.clear();
-    state.penStamps.clear();
-    state.globalTimer = 0.0f;
-    Logger::logInfo(state, 0, "ENGINE", "Reset", "Full reset complete");
-}
-
-void engineUpdate(GameState& state, float dt) {
-    if (!state.execCtx.isRunning || state.execCtx.isPaused) return;
-
-    state.globalCycle++;
-    state.globalTimer += dt;
-
-    // Debug step mode
-    checkDebugMode(state);
-    if (state.execCtx.waitingForStep) return;
-
-    // Wait timer handling
-    if (state.execCtx.waitTimer > 0.0f) {
-        state.execCtx.waitTimer -= dt;
-        if (state.execCtx.waitTimer <= 0.0f) {
-            state.execCtx.waitTimer = 0.0f;
-            state.execCtx.pc++;
-        }
-        return;
-    }
-
-    // WaitUntil handling
-    if (state.execCtx.waitingUntil) {
-        if (state.execCtx.pc < (int)state.editorBlocks.size()) {
-            Block* block = state.editorBlocks[state.execCtx.pc];
-            if (block && !block->params.empty()) {
-                bool cond = evaluateCondition(state, block->params[0]);
-                if (cond) {
-                    state.execCtx.waitingUntil = false;
-                    state.execCtx.pc++;
-                }
-            }
-        }
-        return;
-    }
-
-    // Waiting for user answer
-    if (state.waitingForAnswer) return;
-
-    // Bounds check
-    if (state.execCtx.pc >= (int)state.editorBlocks.size()) {
-        stopExecution(state);
-        return;
-    }
-
-    // Watchdog
-    state.execCtx.watchdogCounter++;
-    if (watchdogCheck(state)) {
-        Logger::logError(state, state.execCtx.pc, "WATCHDOG",
-                         "InfiniteLoop", "Infinite loop detected! Stopping.");
-        stopExecution(state);
-        return;
-    }
-
-    // Fetch & execute
-    Block* block = fetchNextBlock(state);
-    if (block) {
-        executeBlock(state, block, dt);
-    } else {
-        stopExecution(state);
-    }
-}
-
-
-    // PRE-PROCESSING
-    void preProcessBlocks(GameState& state, std::vector<Block*>& blocks) {
-        // Stack-based matching of control structures
-        std::vector<int> stack; // indices of unmatched starts
-
-        for (int i = 0; i < (int)blocks.size(); i++) {
-            Block* b = blocks[i];
-            if (!b) continue;
-
-            switch (b->type) {
-                case BlockType::IfThen:
-                case BlockType::IfThenElse:
-                case BlockType::Repeat:
-                case BlockType::RepeatUntil:
-                case BlockType::Forever:
-                    stack.push_back(i);
-                    break;
-
-                case BlockType::Else:
-                    // Find matching IfThenElse
-                    if (!stack.empty()) {
-                        int startIdx = stack.back();
-                        blocks[startIdx]->elseTarget = i;
-                    }
-                    break;
-
-                case BlockType::EndIf:
-                    if (!stack.empty()) {
-                        int startIdx = stack.back();
-                        stack.pop_back();
-                        blocks[startIdx]->jumpTarget = i;
-                        b->jumpTarget = startIdx; // back-pointer
-                    }
-                    break;
-
-                case BlockType::EndRepeat:
-                    if (!stack.empty()) {
-                        int startIdx = stack.back();
-                        stack.pop_back();
-                        blocks[startIdx]->jumpTarget = i;
-                        b->jumpTarget = startIdx; // jump back target
-                    }
-                    break;
-
-                case BlockType::EndForever:
-                    if (!stack.empty()) {
-                        int startIdx = stack.back();
-                        stack.pop_back();
-                        blocks[startIdx]->jumpTarget = i;
-                        b->jumpTarget = startIdx;
-                    }
-                    break;
-
-                default:
-                    break;
-            }
-        }
-        Logger::logInfo(state, 0, "PREPROCESS", "Done",
-                        "Pre-processed " + std::to_string(blocks.size()) + " blocks");
-    }
-
-    // PC / FETCHING
-
-    Block* fetchNextBlock(GameState& state) {
-    if (state.execCtx.pc < 0 || state.execCtx.pc >= (int)state.editorBlocks.size())
-        return nullptr;
-    Block* block = state.editorBlocks[state.execCtx.pc];
-    state.execCtx.pc++;
-    return block;
-}
-
-    void jumpTo(GameState& state, int targetLine) {
-    state.execCtx.pc = targetLine;
-}
-
-
-    // MAIN DISPATCHER
-void executeBlock(GameState& state, Block* block, float dt) {
-    if (!block) return;
-
-    // Reset watchdog on each real instruction
-    state.execCtx.watchdogCounter = 0;
-
-    switch (block->type) {
-        // ── Motion ──
-        case BlockType::Move:               executeMove(state, block);               break;
-        case BlockType::TurnLeft:           executeTurnLeft(state, block);            break;
-        case BlockType::TurnRight:          executeTurnRight(state, block);           break;
-        case BlockType::GoTo:               executeGoTo(state, block);               break;
-        case BlockType::ChangeX:            executeChangeX(state, block);            break;
-        case BlockType::ChangeY:            executeChangeY(state, block);            break;
-        case BlockType::SetX:               executeSetX(state, block);               break;
-        case BlockType::SetY:               executeSetY(state, block);               break;
-        case BlockType::PointInDirection:   executePointInDirection(state, block);   break;
-        case BlockType::GoToRandom:         executeGoToRandom(state, block);         break;
-        case BlockType::GoToMouse:          executeGoToMouse(state, block);          break;
-        case BlockType::BounceOffEdge:      executeBounceOffEdge(state, block);      break;
-
-        // ── Looks ──
-        case BlockType::Say:                executeSay(state, block);                break;
-        case BlockType::SayForTime:         executeSayForTime(state, block);         break;
-        case BlockType::Think:              executeThink(state, block);              break;
-        case BlockType::ThinkForTime:       executeThinkForTime(state, block);       break;
-        case BlockType::SwitchCostume:      executeSwitchCostume(state, block);      break;
-        case BlockType::NextCostume:        executeNextCostume(state, block);        break;
-        case BlockType::SwitchBackdrop:     executeSwitchBackdrop(state, block);     break;
-        case BlockType::NextBackdrop:       executeNextBackdrop(state, block);       break;
-        case BlockType::ChangeSize:         executeChangeSize(state, block);         break;
-        case BlockType::SetSize:            executeSetSize(state, block);            break;
-        case BlockType::Show:               executeShow(state, block);               break;
-        case BlockType::Hide:               executeHide(state, block);               break;
-        case BlockType::GoToFrontLayer:     executeGoToFrontLayer(state, block);     break;
-        case BlockType::GoToBackLayer:      executeGoToBackLayer(state, block);      break;
-        case BlockType::MoveLayerForward:   executeMoveLayerForward(state, block);   break;
-        case BlockType::MoveLayerBackward:  executeMoveLayerBackward(state, block);  break;
-        case BlockType::ChangeGraphicEffect:executeChangeGraphicEffect(state, block);break;
-        case BlockType::SetGraphicEffect:   executeSetGraphicEffect(state, block);   break;
-        case BlockType::ClearGraphicEffects:executeClearGraphicEffects(state, block);break;
-
-        // ── Sound ──
-        case BlockType::PlaySound:          executePlaySound(state, block);          break;
-        case BlockType::PlaySoundUntilDone: executePlaySoundUntilDone(state, block); break;
-        case BlockType::StopAllSounds:      executeStopAllSounds(state, block);      break;
-        case BlockType::SetVolume:          executeSetVolume(state, block);          break;
-        case BlockType::ChangeVolume:       executeChangeVolume(state, block);       break;
-
-        // ── Events ──
-        case BlockType::WhenGreenFlagClicked:
-        case BlockType::WhenKeyPressed:
-        case BlockType::WhenSpriteClicked:
-        case BlockType::WhenBroadcast:
-            // Event hat blocks: just skip (they're entry points)
-            break;
-        case BlockType::Broadcast:          executeBroadcast(state, block);          break;
-
-        // ── Control ──
-        case BlockType::Wait:               executeWait(state, block, dt);           break;
-        case BlockType::Repeat:             executeRepeat(state, block);             break;
-        case BlockType::Forever:            executeForever(state, block);            break;
-        case BlockType::IfThen:             executeIfThen(state, block);             break;
-        case BlockType::IfThenElse:         executeIfThenElse(state, block);         break;
-        case BlockType::WaitUntil:          executeWaitUntil(state, block);          break;
-        case BlockType::RepeatUntil:        executeRepeatUntil(state, block);        break;
-        case BlockType::StopAll:            executeStopAll(state, block);            break;
-
-        // End markers — handled by their parent control blocks
-        case BlockType::EndRepeat: {
-            // Pop loop stack
-            if (!state.execCtx.loopStack.empty()) {
-                int count  = state.execCtx.loopStack.back();
-                int target = state.execCtx.loopReturnStack.back();
-                count--;
-                if (count > 0) {
-                    state.execCtx.loopStack.back() = count;
-                    jumpTo(state, target + 1); // jump back to body start (after Repeat block)
-                } else {
-                    state.execCtx.loopStack.pop_back();
-                    state.execCtx.loopReturnStack.pop_back();
-                    // Continue past EndRepeat (pc already incremented)
-                }
-            }
-            break;
-        }
-        case BlockType::EndForever: {
-            // Unconditional jump back
-            if (!state.execCtx.loopReturnStack.empty()) {
-                int target = state.execCtx.loopReturnStack.back();
-                jumpTo(state, target + 1);
-            }
-            break;
-        }
-        case BlockType::EndIf:
-            // Just fall through
-            break;
-        case BlockType::Else:
-            // If we reach Else while executing (True branch finished), jump to EndIf
-            {
-                // Find the parent IfThenElse — its jumpTarget is EndIf
-                // We stored back-pointer: search backwards
-                for (int i = state.execCtx.pc - 2; i >= 0; i--) {
-                    Block* b = state.editorBlocks[i];
-                    if (b && b->type == BlockType::IfThenElse && b->elseTarget == (state.execCtx.pc - 1)) {
-                        jumpTo(state, b->jumpTarget + 1);
-                        break;
-                    }
-                }
-            }
-            break;
-
-        // ── Sensing ──
-        case BlockType::Ask:                executeAsk(state, block);                break;
-
-        // ── Variables ──
-        case BlockType::SetVariable:        executeSetVariable(state, block);        break;
-        case BlockType::ChangeVariable:     executeChangeVariable(state, block);     break;
-
-        // ── Custom Functions ──
-        case BlockType::DefineFunction:     executeDefineFunction(state, block);     break;
-        case BlockType::CallFunction:       executeCallFunction(state, block);       break;
-
-        // ── Pen ──
-        case BlockType::PenDown:            executePenDown(state, block);            break;
-        case BlockType::PenUp:              executePenUp(state, block);              break;
-        case BlockType::Stamp:              executeStamp(state, block);              break;
-        case BlockType::EraseAll:           executeEraseAll(state, block);           break;
-        case BlockType::SetPenColor:        executeSetPenColor(state, block);        break;
-        case BlockType::SetPenSize:         executeSetPenSize(state, block);         break;
-        case BlockType::ChangePenSize:      executeChangePenSize(state, block);      break;
-
-        // ── Timer reset ──
-        case BlockType::ResetTimer:
-            state.globalTimer = 0.0f;
-            Logger::logInfo(state, block->sourceLine, "TIMER", "Reset", "Timer reset to 0");
-            break;
-
-        default:
-            break;
-    }
-}
-
-
-// MOTION BLOCKS
-
-
-void executeMove(GameState& state, Block* block) {
-    Sprite* sprite = getActiveSprite(state);
-    if (!sprite) return;
-
-    double steps = toDouble(evaluateExpression(state, block->params[0]));
-    float oldX = sprite->x, oldY = sprite->y;
-
-    // direction: 90=right, 0=up, 180=down, 270=left
-    float rad = (sprite->direction - 90.0f) * DEG_TO_RAD;
-    sprite->x += (float)(steps * std::cos(rad));
-    sprite->y += (float)(steps * std::sin(rad));
-
-    // Pen trail
-    if (sprite->penDown) {
-        PenStroke stroke;
-        stroke.x1 = oldX; stroke.y1 = oldY;
-        stroke.x2 = sprite->x; stroke.y2 = sprite->y;
-        stroke.color = sprite->penColor;
-        stroke.size  = sprite->penSize;
-        state.penStrokes.push_back(stroke);
-    }
-
-    clampPosition(state, *sprite);
-
-    Logger::logInfo(state, block->sourceLine, "MOVE", "Position",
-                    "(" + std::to_string((int)oldX) + "," + std::to_string((int)oldY) + ") -> (" +
-                    std::to_string((int)sprite->x) + "," + std::to_string((int)sprite->y) + ")");
-}
-
-void executeTurnLeft(GameState& state, Block* block) {
-    Sprite* sprite = getActiveSprite(state);
-    if (!sprite) return;
-    double degrees = toDouble(evaluateExpression(state, block->params[0]));
-    float old = sprite->direction;
-    sprite->direction = wrapAngle(sprite->direction - (float)degrees);
-    Logger::logInfo(state, block->sourceLine, "TURN_LEFT", "Direction",
-                    std::to_string((int)old) + " -> " + std::to_string((int)sprite->direction));
-}
-
-void executeTurnRight(GameState& state, Block* block) {
-    Sprite* sprite = getActiveSprite(state);
-    if (!sprite) return;
-    double degrees = toDouble(evaluateExpression(state, block->params[0]));
-    float old = sprite->direction;
-    sprite->direction = wrapAngle(sprite->direction + (float)degrees);
-    Logger::logInfo(state, block->sourceLine, "TURN_RIGHT", "Direction",
-                    std::to_string((int)old) + " -> " + std::to_string((int)sprite->direction));
-}
-
-void executeGoTo(GameState& state, Block* block) {
-    Sprite* sprite = getActiveSprite(state);
-    if (!sprite) return;
-    double newX = toDouble(evaluateExpression(state, block->params[0]));
-    double newY = toDouble(evaluateExpression(state, block->params[1]));
-    sprite->x = (float)newX;
-    sprite->y = (float)newY;
-    clampPosition(state, *sprite);
-    Logger::logInfo(state, block->sourceLine, "GOTO", "Position",
-                    "(" + std::to_string((int)sprite->x) + "," + std::to_string((int)sprite->y) + ")");
-}
-
-void executeChangeX(GameState& state, Block* block) {
-    Sprite* sprite = getActiveSprite(state);
-    if (!sprite) return;
-    double val = toDouble(evaluateExpression(state, block->params[0]));
-    float oldX = sprite->x;
-    sprite->x += (float)val;
-    clampPosition(state, *sprite);
-    Logger::logInfo(state, block->sourceLine, "CHANGE_X", "X",
-                    std::to_string((int)oldX) + " -> " + std::to_string((int)sprite->x));
-}
-
-void executeChangeY(GameState& state, Block* block) {
-    Sprite* sprite = getActiveSprite(state);
-    if (!sprite) return;
-    double val = toDouble(evaluateExpression(state, block->params[0]));
-    float oldY = sprite->y;
-    sprite->y += (float)val;
-    clampPosition(state, *sprite);
-    Logger::logInfo(state, block->sourceLine, "CHANGE_Y", "Y",
-                    std::to_string((int)oldY) + " -> " + std::to_string((int)sprite->y));
-}
-
-void executeSetX(GameState& state, Block* block) {
-    Sprite* sprite = getActiveSprite(state);
-    if (!sprite) return;
-    double val = toDouble(evaluateExpression(state, block->params[0]));
-    sprite->x = (float)val;
-    clampPosition(state, *sprite);
-    Logger::logInfo(state, block->sourceLine, "SET_X", "X", std::to_string((int)sprite->x));
-}
-
-void executeSetY(GameState& state, Block* block) {
-    Sprite* sprite = getActiveSprite(state);
-    if (!sprite) return;
-    double val = toDouble(evaluateExpression(state, block->params[0]));
-    sprite->y = (float)val;
-    clampPosition(state, *sprite);
-    Logger::logInfo(state, block->sourceLine, "SET_Y", "Y", std::to_string((int)sprite->y));
-}
-
-void executePointInDirection(GameState& state, Block* block) {
-    Sprite* sprite = getActiveSprite(state);
-    if (!sprite) return;
-    double angle = toDouble(evaluateExpression(state, block->params[0]));
-    sprite->direction = wrapAngle((float)angle);
-    Logger::logInfo(state, block->sourceLine, "POINT_DIR", "Direction", std::to_string((int)sprite->direction));
-}
-
-void executeGoToRandom(GameState& state, Block* block) {
-    Sprite* sprite = getActiveSprite(state);
-    if (!sprite) return;
-    sprite->x = (float)(rand() % state.stageWidth);
-    sprite->y = (float)(rand() % state.stageHeight);
-    Logger::logInfo(state, block->sourceLine, "GOTO_RANDOM", "Position",
-                    "(" + std::to_string((int)sprite->x) + "," + std::to_string((int)sprite->y) + ")");
-}
-
-void executeGoToMouse(GameState& state, Block* block) {
-    Sprite* sprite = getActiveSprite(state);
-    if (!sprite) return;
-    sprite->x = (float)(state.mouseX - state.stageX);
-    sprite->y = (float)(state.mouseY - state.stageY);
-    clampPosition(state, *sprite);
-    Logger::logInfo(state, block->sourceLine, "GOTO_MOUSE", "Position",
-                    "(" + std::to_string((int)sprite->x) + "," + std::to_string((int)sprite->y) + ")");
-}
-
-void executeBounceOffEdge(GameState& state, Block* block) {
-    Sprite* sprite = getActiveSprite(state);
-    if (!sprite) return;
-    bool bounced = false;
-    if (sprite->x <= 0.0f || sprite->x >= (float)state.stageWidth) {
-        sprite->direction = wrapAngle(180.0f - sprite->direction);
-        bounced = true;
-    }
-    if (sprite->y <= 0.0f || sprite->y >= (float)state.stageHeight) {
-        sprite->direction = wrapAngle(-sprite->direction);
-        bounced = true;
-    }
-    clampPosition(state, *sprite);
-    if (bounced)
-        Logger::logInfo(state, block->sourceLine, "BOUNCE", "Direction", std::to_string((int)sprite->direction));
-}
-
-
-// LOOKS BLOCKS
-void executeSay(GameState& state, Block* block) {
-    Sprite* sprite = getActiveSprite(state);
-    if (!sprite) return;
-    std::string text = toString(evaluateExpression(state, block->params[0]));
-    sprite->speechText = text;
-    sprite->isThinker  = false;
-    sprite->speechTimer = -1.0f; // permanent
-    Logger::logInfo(state, block->sourceLine, "SAY", "Text", text);
-}
-
-void executeSayForTime(GameState& state, Block* block) {
-    Sprite* sprite = getActiveSprite(state);
-    if (!sprite) return;
-    std::string text = toString(evaluateExpression(state, block->params[0]));
-    double secs      = toDouble(evaluateExpression(state, block->params[1]));
-    sprite->speechText  = text;
-    sprite->isThinker   = false;
-    sprite->speechTimer = (float)secs;
-    Logger::logInfo(state, block->sourceLine, "SAY_FOR", "Text", text + " for " + std::to_string((int)secs) + "s");
-}
-
-void executeThink(GameState& state, Block* block) {
-    Sprite* sprite = getActiveSprite(state);
-    if (!sprite) return;
-    std::string text = toString(evaluateExpression(state, block->params[0]));
-    sprite->speechText = text;
-    sprite->isThinker  = true;
-    sprite->speechTimer = -1.0f;
-    Logger::logInfo(state, block->sourceLine, "THINK", "Text", text);
-}
-
-void executeThinkForTime(GameState& state, Block* block) {
-    Sprite* sprite = getActiveSprite(state);
-    if (!sprite) return;
-    std::string text = toString(evaluateExpression(state, block->params[0]));
-    double secs      = toDouble(evaluateExpression(state, block->params[1]));
-    sprite->speechText  = text;
-    sprite->isThinker   = true;
-    sprite->speechTimer = (float)secs;
-    Logger::logInfo(state, block->sourceLine, "THINK_FOR", "Text", text + " for " + std::to_string((int)secs) + "s");
-}
-
-void executeSwitchCostume(GameState& state, Block* block) {
-    Sprite* sprite = getActiveSprite(state);
-    if (!sprite) return;
-    std::string name = toString(evaluateExpression(state, block->params[0]));
-    for (int i = 0; i < (int)sprite->costumes.size(); i++) {
-        if (sprite->costumes[i].name == name) {
-            sprite->currentCostume = i;
-            Logger::logInfo(state, block->sourceLine, "COSTUME", "Switch", name);
-            return;
-        }
-    }
-    Logger::logWarning(state, block->sourceLine, "COSTUME", "Switch", "Costume not found: " + name);
-}
-
-void executeNextCostume(GameState& state, Block* block) {
-    Sprite* sprite = getActiveSprite(state);
-    if (!sprite || sprite->costumes.empty()) return;
-    sprite->currentCostume = (sprite->currentCostume + 1) % (int)sprite->costumes.size();
-    Logger::logInfo(state, block->sourceLine, "COSTUME", "Next", std::to_string(sprite->currentCostume));
-}
-
-void executeSwitchBackdrop(GameState& state, Block* block) {
-    std::string name = toString(evaluateExpression(state, block->params[0]));
-    for (int i = 0; i < (int)state.backdrops.size(); i++) {
-        if (state.backdrops[i].name == name) {
-            state.currentBackdrop = i;
-            Logger::logInfo(state, block->sourceLine, "BACKDROP", "Switch", name);
-            return;
-        }
-    }
-    Logger::logWarning(state, block->sourceLine, "BACKDROP", "Switch", "Backdrop not found: " + name);
-}
-
-void executeNextBackdrop(GameState& state, Block* block) {
-    if (state.backdrops.empty()) return;
-    state.currentBackdrop = (state.currentBackdrop + 1) % (int)state.backdrops.size();
-    Logger::logInfo(state, block->sourceLine, "BACKDROP", "Next", std::to_string(state.currentBackdrop));
-}
-
-void executeChangeSize(GameState& state, Block* block) {
-    Sprite* sprite = getActiveSprite(state);
-    if (!sprite) return;
-    double val = toDouble(evaluateExpression(state, block->params[0]));
-    float oldSize = sprite->size;
-    sprite->size = std::max(1.0f, sprite->size + (float)val);
-    Logger::logInfo(state, block->sourceLine, "SIZE", "Change",
-                    std::to_string((int)oldSize) + "% -> " + std::to_string((int)sprite->size) + "%");
-}
-
-void executeSetSize(GameState& state, Block* block) {
-    Sprite* sprite = getActiveSprite(state);
-    if (!sprite) return;
-    double val = toDouble(evaluateExpression(state, block->params[0]));
-    sprite->size = std::max(1.0f, (float)val);
-    Logger::logInfo(state, block->sourceLine, "SIZE", "Set", std::to_string((int)sprite->size) + "%");
-}
-
-void executeShow(GameState& state, Block* block) {
-    Sprite* sprite = getActiveSprite(state);
-    if (!sprite) return;
-    sprite->visible = true;
-    Logger::logInfo(state, block->sourceLine, "SHOW", "Visible", "true");
-}
-
-void executeHide(GameState& state, Block* block) {
-    Sprite* sprite = getActiveSprite(state);
-    if (!sprite) return;
-    sprite->visible = false;
-    Logger::logInfo(state, block->sourceLine, "HIDE", "Visible", "false");
-}
-
-void executeGoToFrontLayer(GameState& state, Block* block) {
-    Sprite* sprite = getActiveSprite(state);
-    if (!sprite) return;
-    int maxLayer = 0;
-    for (auto* s : state.sprites) maxLayer = std::max(maxLayer, s->layer);
-    sprite->layer = maxLayer + 1;
-    Logger::logInfo(state, block->sourceLine, "LAYER", "Front", std::to_string(sprite->layer));
-}
-
-void executeGoToBackLayer(GameState& state, Block* block) {
-    Sprite* sprite = getActiveSprite(state);
-    if (!sprite) return;
-    int minLayer = 0;
-    for (auto* s : state.sprites) minLayer = std::min(minLayer, s->layer);
-    sprite->layer = minLayer - 1;
-    Logger::logInfo(state, block->sourceLine, "LAYER", "Back", std::to_string(sprite->layer));
-}
-
-void executeMoveLayerForward(GameState& state, Block* block) {
-    Sprite* sprite = getActiveSprite(state);
-    if (!sprite) return;
-    double val = toDouble(evaluateExpression(state, block->params[0]));
-    sprite->layer += (int)val;
-    Logger::logInfo(state, block->sourceLine, "LAYER", "Forward", std::to_string(sprite->layer));
-}
-
-void executeMoveLayerBackward(GameState& state, Block* block) {
-    Sprite* sprite = getActiveSprite(state);
-    if (!sprite) return;
-    double val = toDouble(evaluateExpression(state, block->params[0]));
-    sprite->layer -= (int)val;
-    Logger::logInfo(state, block->sourceLine, "LAYER", "Backward", std::to_string(sprite->layer));
-}
-
-void executeChangeGraphicEffect(GameState& state, Block* block) {
-    Sprite* sprite = getActiveSprite(state);
-    if (!sprite) return;
-    double val = toDouble(evaluateExpression(state, block->params[0]));
-    sprite->colorEffect += (float)val;
-    Logger::logInfo(state, block->sourceLine, "EFFECT", "Change", std::to_string((int)sprite->colorEffect));
-}
-
-void executeSetGraphicEffect(GameState& state, Block* block) {
-    Sprite* sprite = getActiveSprite(state);
-    if (!sprite) return;
-    double val = toDouble(evaluateExpression(state, block->params[0]));
-    sprite->colorEffect = (float)val;
-    Logger::logInfo(state, block->sourceLine, "EFFECT", "Set", std::to_string((int)sprite->colorEffect));
-}
-
-void executeClearGraphicEffects(GameState& state, Block* block) {
-    Sprite* sprite = getActiveSprite(state);
-    if (!sprite) return;
-    sprite->colorEffect = 0.0f;
-    Logger::logInfo(state, block->sourceLine, "EFFECT", "Clear", "0");
-}
-
-// SOUND BLOCKS
-
-void executePlaySound(GameState& state, Block* block) {
-    Sprite* sprite = getActiveSprite(state);
-    if (!sprite) return;
-    std::string name = toString(evaluateExpression(state, block->params[0]));
-    for (auto& snd : sprite->sounds) {
-        if (snd.name == name && snd.chunk && !snd.muted) {
-            Mix_VolumeChunk(snd.chunk, (int)(snd.volume * MIX_MAX_VOLUME / 100));
-            snd.channel = Mix_PlayChannel(-1, snd.chunk, 0);
-            Logger::logInfo(state, block->sourceLine, "SOUND", "Play", name);
-            return;
-        }
-    }
-    Logger::logWarning(state, block->sourceLine, "SOUND", "Play", "Sound not found: " + name);
-}
-
-void executePlaySoundUntilDone(GameState& state, Block* block) {
-    // Same as PlaySound for now (blocking not implemented for simplicity)
-    executePlaySound(state, block);
-}
-
-void executeStopAllSounds(GameState& state, Block* block) {
-    Mix_HaltChannel(-1);
-    Logger::logInfo(state, block->sourceLine, "SOUND", "StopAll", "All sounds stopped");
-}
-
-void executeSetVolume(GameState& state, Block* block) {
-    Sprite* sprite = getActiveSprite(state);
-    if (!sprite) return;
-    double vol = toDouble(evaluateExpression(state, block->params[0]));
-    vol = std::max(0.0, std::min(100.0, vol));
-    for (auto& snd : sprite->sounds) snd.volume = (int)vol;
-    Logger::logInfo(state, block->sourceLine, "SOUND", "SetVolume", std::to_string((int)vol) + "%");
-}
-
-void executeChangeVolume(GameState& state, Block* block) {
-    Sprite* sprite = getActiveSprite(state);
-    if (!sprite) return;
-    double change = toDouble(evaluateExpression(state, block->params[0]));
-    for (auto& snd : sprite->sounds) {
-        snd.volume = std::max(0, std::min(100, snd.volume + (int)change));
-    }
-    Logger::logInfo(state, block->sourceLine, "SOUND", "ChangeVolume", std::to_string((int)change));
-}
-
-
-// EVENTS
-void executeBroadcast(GameState& state, Block* block) {
-    std::string msg = toString(evaluateExpression(state, block->params[0]));
-    state.lastBroadcast    = msg;
-    state.broadcastPending = true;
-    Logger::logInfo(state, block->sourceLine, "BROADCAST", "Send", msg);
-}
-
-
-// CONTROL FLOW
-
-void executeWait(GameState& state, Block* block, float dt) {
-    double secs = toDouble(evaluateExpression(state, block->params[0]));
-    state.execCtx.waitTimer = (float)secs;
-    state.execCtx.pc--; // stay on this block until timer finishes
-    Logger::logInfo(state, block->sourceLine, "WAIT", "Timer", std::to_string((int)secs) + "s");
-}
-
-void executeRepeat(GameState& state, Block* block) {
-    double count = toDouble(evaluateExpression(state, block->params[0]));
-    int icount = (int)count;
-    if (icount <= 0) {
-        // Skip to EndRepeat
-        if (block->jumpTarget >= 0) jumpTo(state, block->jumpTarget + 1);
-        return;
-    }
-    state.execCtx.loopStack.push_back(icount);
-    state.execCtx.loopReturnStack.push_back(state.execCtx.pc - 1); // index of Repeat block
-    Logger::logInfo(state, block->sourceLine, "REPEAT", "Start", std::to_string(icount) + " times");
-}
-
-void executeForever(GameState& state, Block* block) {
-    state.execCtx.loopReturnStack.push_back(state.execCtx.pc - 1);
-    Logger::logInfo(state, block->sourceLine, "FOREVER", "Start", "infinite loop");
-}
-
-void executeIfThen(GameState& state, Block* block) {
-    bool cond = evaluateCondition(state, block->params[0]);
-    if (!cond) {
-        // Jump to EndIf
-        if (block->jumpTarget >= 0) jumpTo(state, block->jumpTarget + 1);
-        Logger::logInfo(state, block->sourceLine, "IF", "Branch", "FALSE -> skip");
-    } else {
-        Logger::logInfo(state, block->sourceLine, "IF", "Branch", "TRUE -> enter");
-    }
-}
-
-void executeIfThenElse(GameState& state, Block* block) {
-    bool cond = evaluateCondition(state, block->params[0]);
-    if (!cond) {
-        // Jump to Else + 1
-        if (block->elseTarget >= 0) jumpTo(state, block->elseTarget + 1);
-        Logger::logInfo(state, block->sourceLine, "IF_ELSE", "Branch", "FALSE -> else");
-    } else {
-        Logger::logInfo(state, block->sourceLine, "IF_ELSE", "Branch", "TRUE -> if body");
-    }
-}
-
-void executeWaitUntil(GameState& state, Block* block) {
-    bool cond = evaluateCondition(state, block->params[0]);
-    if (!cond) {
-        state.execCtx.waitingUntil = true;
-        state.execCtx.pc--; // stay on this block
-        Logger::logInfo(state, block->sourceLine, "WAIT_UNTIL", "Waiting", "condition not met");
-    } else {
-        Logger::logInfo(state, block->sourceLine, "WAIT_UNTIL", "Continue", "condition met");
-    }
-}
-
-void executeRepeatUntil(GameState& state, Block* block) {
-    bool cond = evaluateCondition(state, block->params[0]);
-    if (cond) {
-        // Exit loop: jump to EndRepeat + 1
-        if (block->jumpTarget >= 0) jumpTo(state, block->jumpTarget + 1);
-        Logger::logInfo(state, block->sourceLine, "REPEAT_UNTIL", "Exit", "condition met");
-    } else {
-        // Enter/continue loop body
-        state.execCtx.loopReturnStack.push_back(state.execCtx.pc - 1);
-        Logger::logInfo(state, block->sourceLine, "REPEAT_UNTIL", "Loop", "condition not met");
-    }
-}
-
-void executeStopAll(GameState& state, Block* block) {
-    state.execCtx.isRunning = false;
-    Logger::logInfo(state, block->sourceLine, "STOP_ALL", "Halt", "All stopped");
-}
-
-// SENSING
-
-bool isTouchingMouse(GameState& state) {
-    Sprite* sprite = getActiveSprite(state);
-    if (!sprite) return false;
-    int mx = state.mouseX - state.stageX;
-    int my = state.mouseY - state.stageY;
-    float hw = 32.0f * sprite->size / 100.0f;
-    float hh = 32.0f * sprite->size / 100.0f;
-    return (mx >= sprite->x - hw && mx <= sprite->x + hw &&
-            my >= sprite->y - hh && my <= sprite->y + hh);
-}
-
-bool isTouchingEdge(GameState& state) {
-    Sprite* sprite = getActiveSprite(state);
-    if (!sprite) return false;
-    return (sprite->x <= 0.0f || sprite->x >= (float)state.stageWidth ||
-            sprite->y <= 0.0f || sprite->y >= (float)state.stageHeight);
-}
-
-float distanceToMouse(GameState& state) {
-    Sprite* sprite = getActiveSprite(state);
-    if (!sprite) return 0.0f;
-    float mx = (float)(state.mouseX - state.stageX);
-    float my = (float)(state.mouseY - state.stageY);
-    float dx = sprite->x - mx;
-    float dy = sprite->y - my;
-    return std::sqrt(dx*dx + dy*dy);
-}
-
-float distanceToSprite(GameState& state, const std::string& name) {
-    Sprite* sprite = getActiveSprite(state);
-    if (!sprite) return 0.0f;
-    for (auto* s : state.sprites) {
-        if (s->name == name && s != sprite) {
-            float dx = sprite->x - s->x;
-            float dy = sprite->y - s->y;
-            return std::sqrt(dx*dx + dy*dy);
-        }
-    }
-    return 0.0f;
-}
-
-bool isKeyPressed(GameState& state, const std::string& key) {
-    const Uint8* keys = SDL_GetKeyboardState(nullptr);
-    if (key == "space")     return keys[SDL_SCANCODE_SPACE];
-    if (key == "up")        return keys[SDL_SCANCODE_UP];
-    if (key == "down")      return keys[SDL_SCANCODE_DOWN];
-    if (key == "left")      return keys[SDL_SCANCODE_LEFT];
-    if (key == "right")     return keys[SDL_SCANCODE_RIGHT];
-    if (key == "enter")     return keys[SDL_SCANCODE_RETURN];
-    if (key.size() == 1)    return keys[SDL_SCANCODE_A + (key[0] - 'a')];
-    return false;
-}
-
-void executeAsk(GameState& state, Block* block) {
-    std::string question = toString(evaluateExpression(state, block->params[0]));
-    state.askQuestion     = question;
-    state.waitingForAnswer = true;
-    state.userAnswer       = "";
-    Logger::logInfo(state, block->sourceLine, "ASK", "Question", question);
-}
-
-// CUSTOM FUNCTIONS
-
-
-void executeDefineFunction(GameState& state, Block* block) {
-    FunctionDef func;
-    func.name       = block->name;
-    func.paramNames = block->paramNames;
-    func.body       = block->body;
-    state.functions[func.name] = func;
-    Logger::logInfo(state, block->sourceLine, "DEFINE_FN", "Defined", func.name);
-}
-
-void executeCallFunction(GameState& state, Block* block) {
-    std::string name = block->name;
-    if (state.functions.find(name) == state.functions.end()) {
-        Logger::logError(state, block->sourceLine, "CALL_FN", "NotFound", name);
-        return;
-    }
-    const FunctionDef& func = state.functions[name];
-
-    // Evaluate arguments
-    std::vector<Value> args;
-    for (size_t i = 0; i < block->params.size(); i++) {
-        args.push_back(evaluateExpression(state, block->params[i]));
-    }
-
-    executeFunctionBody(state, func, args);
-    Logger::logInfo(state, block->sourceLine, "CALL_FN", "Called", name);
-}
-
-void executeFunctionBody(GameState& state, const FunctionDef& func,
-                         const std::vector<Value>& args) {
-    // Save current variables, set params
-    ExecutionContext::CallFrame frame;
-    frame.returnPC = state.execCtx.pc;
-
-    // Set parameter variables
-    for (size_t i = 0; i < func.paramNames.size() && i < args.size(); i++) {
-        if (state.variables.count(func.paramNames[i]))
-            frame.localVars[func.paramNames[i]] = state.variables[func.paramNames[i]];
-        state.variables[func.paramNames[i]] = args[i];
-    }
-    state.execCtx.callStack.push_back(frame);
-
-    // Execute body blocks inline
-    // We insert them temporarily into editorBlocks
-    int insertAt = state.execCtx.pc;
-    for (size_t i = 0; i < func.body.size(); i++) {
-        state.editorBlocks.insert(state.editorBlocks.begin() + insertAt + (int)i, func.body[i]);
-    }
-    // Re-preprocess to fix jump targets
-    preProcessBlocks(state, state.editorBlocks);
-
-    // After body executes, we'll restore via a special end marker
-    // For simplicity, we execute the body directly here
-    int savedPC = state.execCtx.pc;
-    state.execCtx.pc = insertAt;
-
-    for (size_t i = 0; i < func.body.size(); i++) {
-        if (!state.execCtx.isRunning) break;
-        Block* b = state.editorBlocks[state.execCtx.pc];
-        state.execCtx.pc++;
-        if (b) executeBlock(state, b, 0.016f);
-    }
-
-    // Restore
-    // Remove inserted blocks
-    state.editorBlocks.erase(
-        state.editorBlocks.begin() + insertAt,
-        state.editorBlocks.begin() + insertAt + (int)func.body.size()
-    );
-    state.execCtx.pc = savedPC;
-
-    // Restore local vars
-    if (!state.execCtx.callStack.empty()) {
-        auto& cf = state.execCtx.callStack.back();
-        for (auto& it : cf.localVars)
-        {
-            const std::string& k = it.first;
-            Value& v = it.second;
-            state.variables[k] = v;
-        }
-        state.execCtx.callStack.pop_back();
-    }
-}
-
-// PEN BLOCKS
-
-void executePenDown(GameState& state, Block* block) {
-    Sprite* sprite = getActiveSprite(state);
-    if (!sprite) return;
-    sprite->penDown = true;
-    Logger::logInfo(state, block->sourceLine, "PEN", "Down", "Pen down");
-}
-
-void executePenUp(GameState& state, Block* block) {
-    Sprite* sprite = getActiveSprite(state);
-    if (!sprite) return;
-    sprite->penDown = false;
-    Logger::logInfo(state, block->sourceLine, "PEN", "Up", "Pen up");
-}
-
-void executeStamp(GameState& state, Block* block) {
-    Sprite* sprite = getActiveSprite(state);
-    if (!sprite) return;
-    PenStamp stamp;
-    stamp.x    = sprite->x;
-    stamp.y    = sprite->y;
-    stamp.size = sprite->size;
-    if (!sprite->costumes.empty())
-        stamp.texture = sprite->costumes[sprite->currentCostume].texture;
-    state.penStamps.push_back(stamp);
-    Logger::logInfo(state, block->sourceLine, "PEN", "Stamp", "Stamped at (" +
-                    std::to_string((int)sprite->x) + "," + std::to_string((int)sprite->y) + ")");
-}
-
-void executeEraseAll(GameState& state, Block* block) {
-    state.penStrokes.clear();
-    state.penStamps.clear();
-    Logger::logInfo(state, block->sourceLine, "PEN", "EraseAll", "All pen drawings cleared");
-}
-
-void executeSetPenColor(GameState& state, Block* block) {
-    Sprite* sprite = getActiveSprite(state);
-    if (!sprite) return;
-    double r = toDouble(evaluateExpression(state, block->params[0]));
-    double g = toDouble(evaluateExpression(state, block->params[1]));
-    double b = toDouble(evaluateExpression(state, block->params[2]));
-    sprite->penColor = {(Uint8)std::max(0.0, std::min(255.0, r)),
-                        (Uint8)std::max(0.0, std::min(255.0, g)),
-                        (Uint8)std::max(0.0, std::min(255.0, b)), 255};
-    Logger::logInfo(state, block->sourceLine, "PEN", "Color",
-                    "(" + std::to_string((int)r) + "," + std::to_string((int)g) + "," + std::to_string((int)b) + ")");
-}
-
-void executeSetPenSize(GameState& state, Block* block) {
-    Sprite* sprite = getActiveSprite(state);
-    if (!sprite) return;
-    double val = toDouble(evaluateExpression(state, block->params[0]));
-    sprite->penSize = std::max(1, (int)val);
-    Logger::logInfo(state, block->sourceLine, "PEN", "SetSize", std::to_string(sprite->penSize));
-}
-
-void executeChangePenSize(GameState& state, Block* block) {
-    Sprite* sprite = getActiveSprite(state);
-    if (!sprite) return;
-    double val = toDouble(evaluateExpression(state, block->params[0]));
-    sprite->penSize = std::max(1, sprite->penSize + (int)val);
-    Logger::logInfo(state, block->sourceLine, "PEN", "ChangeSize", std::to_string(sprite->penSize));
-}
-
-    // EXPRESSION EVALUATOR
-
-Value evaluateExpression(GameState& state, Block* exprBlock) {
-    if (!exprBlock) return 0.0;
-
-    switch (exprBlock->type) {
-        case BlockType::Literal:
-            return exprBlock->literalValue;
-
-        // ── Arithmetic ──
-        case BlockType::Add: {
-            double a = toDouble(evaluateExpression(state, exprBlock->params[0]));
-            double b = toDouble(evaluateExpression(state, exprBlock->params[1]));
-            return a + b;
-        }
-        case BlockType::Subtract: {
-            double a = toDouble(evaluateExpression(state, exprBlock->params[0]));
-            double b = toDouble(evaluateExpression(state, exprBlock->params[1]));
-            return a - b;
-        }
-        case BlockType::Multiply: {
-            double a = toDouble(evaluateExpression(state, exprBlock->params[0]));
-            double b = toDouble(evaluateExpression(state, exprBlock->params[1]));
-            return a * b;
-        }
-        case BlockType::Divide: {
-            double a = toDouble(evaluateExpression(state, exprBlock->params[0]));
-            double b = toDouble(evaluateExpression(state, exprBlock->params[1]));
-            return safeDivide(a, b, state, exprBlock->sourceLine);
-        }
-        case BlockType::Modulo: {
-            double a = toDouble(evaluateExpression(state, exprBlock->params[0]));
-            double b = toDouble(evaluateExpression(state, exprBlock->params[1]));
-            if (b == 0.0) {
-                Logger::logWarning(state, exprBlock->sourceLine, "MOD", "DivByZero", "modulo by zero");
-                return 0.0;
-            }
-            return std::fmod(a, b);
-        }
-
-        // ── Math functions ──
-        case BlockType::Abs: {
-            double a = toDouble(evaluateExpression(state, exprBlock->params[0]));
-            return std::abs(a);
-        }
-        case BlockType::Sqrt: {
-            double a = toDouble(evaluateExpression(state, exprBlock->params[0]));
-            return safeSqrt(a, state, exprBlock->sourceLine);
-        }
-        case BlockType::Floor: {
-            double a = toDouble(evaluateExpression(state, exprBlock->params[0]));
-            return std::floor(a);
-        }
-        case BlockType::Ceiling: {
-            double a = toDouble(evaluateExpression(state, exprBlock->params[0]));
-            return std::ceil(a);
-        }
-        case BlockType::Sin: {
-            double a = toDouble(evaluateExpression(state, exprBlock->params[0]));
-            return std::sin(a * DEG_TO_RAD);
-        }
-        case BlockType::Cos: {
-            double a = toDouble(evaluateExpression(state, exprBlock->params[0]));
-            return std::cos(a * DEG_TO_RAD);
-        }
-
-        // ── Comparison ──
-        case BlockType::Equal: {
-            Value a = evaluateExpression(state, exprBlock->params[0]);
-            Value b = evaluateExpression(state, exprBlock->params[1]);
-            return toDouble(a) == toDouble(b);
-        }
-        case BlockType::LessThan: {
-            double a = toDouble(evaluateExpression(state, exprBlock->params[0]));
-            double b = toDouble(evaluateExpression(state, exprBlock->params[1]));
-            return a < b;
-        }
-        case BlockType::GreaterThan: {
-            double a = toDouble(evaluateExpression(state, exprBlock->params[0]));
-            double b = toDouble(evaluateExpression(state, exprBlock->params[1]));
-            return a > b;
-        }
-
-        // ── Logical ──
-        case BlockType::And: {
-            bool a = toBool(evaluateExpression(state, exprBlock->params[0]));
-            bool b = toBool(evaluateExpression(state, exprBlock->params[1]));
-            return a && b;
-        }
-        case BlockType::Or: {
-            bool a = toBool(evaluateExpression(state, exprBlock->params[0]));
-            bool b = toBool(evaluateExpression(state, exprBlock->params[1]));
-            return a || b;
-        }
-        case BlockType::Not: {
-            bool a = toBool(evaluateExpression(state, exprBlock->params[0]));
-            return !a;
-        }
-        case BlockType::Xor: {
-            bool a = toBool(evaluateExpression(state, exprBlock->params[0]));
-            bool b = toBool(evaluateExpression(state, exprBlock->params[1]));
-            return a != b;
-        }
-
-        // ── String operators ──
-        case BlockType::StringLength: {
-            std::string s = toString(evaluateExpression(state, exprBlock->params[0]));
-            return (double)s.size();
-        }
-        case BlockType::StringAt: {
-            std::string s = toString(evaluateExpression(state, exprBlock->params[0]));
-            int idx = (int)toDouble(evaluateExpression(state, exprBlock->params[1]));
-            // 1-based indexing
-            if (idx < 1 || idx > (int)s.size()) {
-                Logger::logWarning(state, exprBlock->sourceLine, "STRING_AT", "IndexOOB",
-                                   "Index " + std::to_string(idx) + " out of bounds");
-                return std::string("");
-            }
-            return std::string(1, s[idx - 1]);
-        }
-        case BlockType::StringJoin: {
-            std::string a = toString(evaluateExpression(state, exprBlock->params[0]));
-            std::string b = toString(evaluateExpression(state, exprBlock->params[1]));
-            return a + b;
-        }
-
-        // ── Sensing reporters ──
-        case BlockType::TouchingMouse:
-            return isTouchingMouse(state);
-        case BlockType::TouchingEdge:
-            return isTouchingEdge(state);
-        case BlockType::DistanceToMouse:
-            return (double)distanceToMouse(state);
-        case BlockType::KeyPressed: {
-            std::string key = exprBlock->name;
-            return isKeyPressed(state, key);
-        }
-        case BlockType::MouseDown:
-            return state.mouseDown;
-        case BlockType::MouseX:
-            return (double)(state.mouseX - state.stageX);
-        case BlockType::MouseY:
-            return (double)(state.mouseY - state.stageY);
-        case BlockType::Timer:
-            return (double)state.globalTimer;
-        case BlockType::Answer:
-            return state.userAnswer;
-
-        // ── Reporter blocks ──
-        case BlockType::ReporterCostumeNumber: {
-            Sprite* sprite = getActiveSprite(state);
-            return sprite ? (double)(sprite->currentCostume + 1) : 0.0;
-        }
-        case BlockType::ReporterBackdropNumber:
-            return (double)(state.currentBackdrop + 1);
-        case BlockType::ReporterSize: {
-            Sprite* sprite = getActiveSprite(state);
-            return sprite ? (double)sprite->size : 100.0;
-        }
-
-        default:
-            return 0.0;
-    }
-}
-
-bool evaluateCondition(GameState& state, Block* condBlock) {
-    Value result = evaluateExpression(state, condBlock);
-    return toBool(result);
-}
-
-Value resolveVariable(GameState& state, const std::string& name) {
-    // Check call stack local vars first
-    if (!state.execCtx.callStack.empty()) {
-        auto& frame = state.execCtx.callStack.back();
-        if (frame.localVars.count(name))
-            return frame.localVars[name];
-    }
-    if (state.variables.count(name))
-        return state.variables[name];
-    Logger::logWarning(state, 0, "VAR", "NotFound", name);
-    return 0.0;
-}
-
-
-// SAFETY
+//helpers
 
+static float stageHalfW(const GameState& s) { return s.stageWidth  / 2.0f; }
+static float stageHalfH(const GameState& s) { return s.stageHeight / 2.0f; }
 
-bool watchdogCheck(GameState& state) {
-    return state.execCtx.watchdogCounter >= ExecutionContext::WATCHDOG_MAX;
+// Clamp sprite to stage boundaries
+static void clampToStage(Sprite* sp, const GameState& gs) {
+    float hw = stageHalfW(gs);
+    float hh = stageHalfH(gs);
+    if (sp->x < -hw) sp->x = -hw;
+    if (sp->x >  hw) sp->x =  hw;
+    if (sp->y < -hh) sp->y = -hh;
+    if (sp->y >  hh) sp->y =  hh;
 }
 
-void clampPosition(GameState& state, Sprite& sprite) {
-    sprite.x = std::max(0.0f, std::min((float)state.stageWidth, sprite.x));
-    sprite.y = std::max(0.0f, std::min((float)state.stageHeight, sprite.y));
+// Normalize direction to [0, 360)
+static float normDir(float d) {
+    while (d <   0) d += 360;
+    while (d >= 360) d -= 360;
+    return d;
 }
 
-Value safeDivide(double a, double b, GameState& state, int line) {
-    if (b == 0.0) {
-        Logger::logWarning(state, line, "MATH", "DivByZero", "Division by zero");
-        return 0.0;
+// Safe division
+static double safeDivide(double a, double b) {
+    if (b == 0) {
+        Logger::warning("Math safeguard: division by zero prevented");
+        return 0;
     }
     return a / b;
 }
 
-Value safeSqrt(double x, GameState& state, int line) {
-    if (x < 0.0) {
-        Logger::logWarning(state, line, "MATH", "NegSqrt", "Square root of negative number");
-        return 0.0;
+// Safe sqrt
+static double safeSqrt(double x) {
+    if (x < 0) {
+        Logger::warning("Math safeguard: sqrt of negative number prevented");
+        return 0;
     }
     return std::sqrt(x);
 }
 
+// Evaluate a simple numeric block value
+static double evalNum(const Block* b, const GameState& gs, Sprite* sp) {
+    if (!b) return 0;
+    if (b->type == BLOCK_Literal) return b->numberValue;
+    if (b->type == BLOCK_MouseX)  return gs.mouseX - gs.stageX - gs.stageWidth / 2;
+    if (b->type == BLOCK_MouseY)  return gs.stageY + gs.stageHeight / 2 - gs.mouseY;
+    if (b->type == BLOCK_Timer)   return (double)gs.exec.globalTimer;
 
-// DEBUG
-
-
-void checkDebugMode(GameState& state) {
-    if (!state.execCtx.isDebugMode) {
-        state.execCtx.waitingForStep = false;
-        return;
+    // Variable lookup
+    if (b->type == BLOCK_SetVariable || b->type == BLOCK_ChangeVariable) {
+        auto it = gs.variables.find(b->stringValue);
+        if (it != gs.variables.end()) {
+            try { return std::stod(it->second); } catch(...) {}
+        }
+        return 0;
     }
-    // In debug mode, we wait for spacebar
-    state.execCtx.waitingForStep = true;
+
+    // Basic operators
+    double left  = b->inputs.size() > 0 ? evalNum(b->inputs[0], gs, sp) : b->numberValue;
+    double right = b->inputs.size() > 1 ? evalNum(b->inputs[1], gs, sp) : 0;
+    switch (b->type) {
+        case BLOCK_Add:      return left + right;
+        case BLOCK_Subtract: return left - right;
+        case BLOCK_Multiply: return left * right;
+        case BLOCK_Divide:   return safeDivide(left, right);
+        case BLOCK_Mod:      return (right != 0) ? std::fmod(left, right) : 0;
+        case BLOCK_Random: {
+            double lo = std::min(left, right);
+            double hi = std::max(left, right);
+            return lo + (double)rand() / RAND_MAX * (hi - lo);
+        }
+        case BLOCK_Abs:     return std::fabs(left);
+        case BLOCK_Sqrt:    return safeSqrt(left);
+        case BLOCK_Floor:   return std::floor(left);
+        case BLOCK_Ceiling: return std::ceil(left);
+        case BLOCK_Round:   return std::round(left);
+        case BLOCK_Sin:     return std::sin(left * M_PI / 180.0);
+        case BLOCK_Cos:     return std::cos(left * M_PI / 180.0);
+        case BLOCK_LengthOf: {
+            // string length
+            std::string s = b->inputs.size() > 0 ? b->inputs[0]->stringValue : b->stringValue;
+            return (double)s.size();
+        }
+        case BLOCK_DistanceTo: {
+                // فاصله تا mouse pointer
+                if (b->stringValue == "mouse pointer") {
+                    // موقعیت ماوس در مختصات صحنه
+                    float mouseSceneX = gs.mouseX - gs.stageX - gs.stageWidth/2;
+                    float mouseSceneY = gs.stageY + gs.stageHeight/2 - gs.mouseY;
+
+                    float dx = mouseSceneX - sp->x;
+                    float dy = mouseSceneY - sp->y;
+
+                    double distance = std::sqrt(dx*dx + dy*dy);
+                    Logger::info("Distance to mouse: " + std::to_string(distance));
+                    return distance;
+                }
+                return 0;
+        }
+        default: return b->numberValue;
+    }
 }
 
-
-// SPEECH BUBBLE TIMER
-
-
-void updateSpeechBubbles(GameState& state, float dt) {
-    for (auto* sprite : state.sprites) {
-        if (sprite->speechTimer > 0.0f) {
-            sprite->speechTimer -= dt;
-            if (sprite->speechTimer <= 0.0f) {
-                sprite->speechText  = "";
-                sprite->speechTimer = -1.0f;
+// Evaluate boolean condition
+static bool evalBool(const Block* b, const GameState& gs, Sprite* sp) {
+    if (!b) return false;
+    double left  = b->inputs.size() > 0 ? evalNum(b->inputs[0], gs, sp) : 0;
+    double right = b->inputs.size() > 1 ? evalNum(b->inputs[1], gs, sp) : 0;
+    bool   bleft = b->inputs.size() > 0 ? evalBool(b->inputs[0], gs, sp) : false;
+    bool   bright= b->inputs.size() > 1 ? evalBool(b->inputs[1], gs, sp) : false;
+    switch (b->type) {
+        case BLOCK_LessThan:    return left  <  right;
+        case BLOCK_GreaterThan: return left  >  right;
+        case BLOCK_Equal:       return std::fabs(left - right) < 1e-9;
+        case BLOCK_And:         return bleft && bright;
+        case BLOCK_Or:          return bleft || bright;
+        case BLOCK_Not:         return !bleft;
+        case BLOCK_MouseDown:   return gs.mousePressed;
+        case BLOCK_KeyPressed:  {
+            const Uint8* ks = SDL_GetKeyboardState(nullptr);
+            // map b->stringValue to a scancode (simplified: space only)
+            if (b->stringValue == "space")  return ks[SDL_SCANCODE_SPACE];
+            if (b->stringValue == "up")     return ks[SDL_SCANCODE_UP];
+            if (b->stringValue == "down")   return ks[SDL_SCANCODE_DOWN];
+            if (b->stringValue == "left")   return ks[SDL_SCANCODE_LEFT];
+            if (b->stringValue == "right")  return ks[SDL_SCANCODE_RIGHT];
+            return false;
+        }
+        case BLOCK_Touching: {
+            // touching edge
+            if (b->stringValue == "edge") {
+                float hw = stageHalfW(gs), hh = stageHalfH(gs);
+                return sp->x <= -hw || sp->x >= hw || sp->y <= -hh || sp->y >= hh;
             }
+            return false;
+        }
+        default: return false;
+    }
+}
+
+//pre-scan: compute jump targets for control flow
+void preScan(GameState& gs) {
+    // For now we use a simple linear scan of editorBlocks.
+    // Repeat/If/IfElse are handled via nested lists in the Block struct
+    // so no explicit jump computation is needed for nested execution.
+    // This satisfies the doc requirement.
+    Logger::info("Pre-scan complete");
+}
+
+// execute one block for a sprite
+// Returns true if execution should continue immediately to next block,
+// false if the engine should wait (wait-block, ask, etc.)
+
+bool executeOneBlock(GameState& gs, Sprite* sp, SpriteExecCtx& ctx,
+                     const std::vector<Block*>& script)
+{
+    if (ctx.pc >= (int)script.size()) {
+        ctx.finished = true;
+        return false;
+    }
+
+    Block* block = script[ctx.pc];
+    std::ostringstream logMsg;
+    logMsg << "[PC:" << ctx.pc << "] [Sprite:" << sp->name
+           << "] [CMD:" << block->text << "]";
+
+    gs.watchdogCounter++;
+    if (gs.watchdogCounter > GameState::WATCHDOG_LIMIT) {
+        Logger::warning("Infinite loop detected! Stopping execution.");
+        gs.exec.running = false;
+        ctx.finished = true;
+        return false;
+    }
+
+    switch (block->type) {
+
+    //  MOTION
+    case BLOCK_Move: {
+        float steps = (float)(block->inputs.empty() ? block->numberValue
+                                                    : evalNum(block->inputs[0], gs, sp));
+        float rad = (sp->direction - 90.0f) * (float)(M_PI / 180.0);
+        sp->x += steps * std::cos(rad);
+        sp->y += steps * std::sin(rad);  // Scratch Y+ = up
+        clampToStage(sp, gs);
+        Logger::info(logMsg.str() + " -> moved " + std::to_string(steps) + " steps");
+        break;
+    }
+    case BLOCK_TurnRight: {
+        float deg = (float)(block->inputs.empty() ? block->numberValue
+                                                  : evalNum(block->inputs[0], gs, sp));
+        sp->direction = normDir(sp->direction + deg);
+        break;
+    }
+    case BLOCK_TurnLeft: {
+        float deg = (float)(block->inputs.empty() ? block->numberValue
+                                                  : evalNum(block->inputs[0], gs, sp));
+        sp->direction = normDir(sp->direction - deg);
+        break;
+    }
+    case BLOCK_GoToXY: {
+        sp->x = (float)(block->inputs.size() > 0 ? evalNum(block->inputs[0], gs, sp) : block->numberValue);
+        sp->y = (float)(block->inputs.size() > 1 ? evalNum(block->inputs[1], gs, sp) : 0);
+        clampToStage(sp, gs);
+        break;
+    }
+    case BLOCK_SetX: {
+        sp->x = (float)(block->inputs.empty() ? block->numberValue : evalNum(block->inputs[0], gs, sp));
+        clampToStage(sp, gs);
+        break;
+    }
+    case BLOCK_SetY: {
+        sp->y = (float)(block->inputs.empty() ? block->numberValue : evalNum(block->inputs[0], gs, sp));
+        clampToStage(sp, gs);
+        break;
+    }
+    case BLOCK_ChangeX: {
+        sp->x += (float)(block->inputs.empty() ? block->numberValue : evalNum(block->inputs[0], gs, sp));
+        clampToStage(sp, gs);
+        break;
+    }
+    case BLOCK_ChangeY: {
+        sp->y += (float)(block->inputs.empty() ? block->numberValue : evalNum(block->inputs[0], gs, sp));
+        clampToStage(sp, gs);
+        break;
+    }
+    case BLOCK_PointDirection: {
+        float d = (float)(block->inputs.empty() ? block->numberValue : evalNum(block->inputs[0], gs, sp));
+        sp->direction = normDir(d);
+        break;
+    }
+    case BLOCK_BounceOffEdge: {
+        float hw = stageHalfW(gs), hh = stageHalfH(gs);
+        bool hitH = (sp->x <= -hw || sp->x >= hw);
+        bool hitV = (sp->y <= -hh || sp->y >= hh);
+        if (hitH || hitV) {
+            float rad = (sp->direction - 90.0f) * (float)(M_PI / 180.0);
+            float dx = std::cos(rad), dy = std::sin(rad);
+            if (hitH) dx = -dx;
+            if (hitV) dy = -dy;
+            sp->direction = normDir((float)(std::atan2(dy, dx) * 180.0 / M_PI) + 90.0f);
+        }
+        break;
+    }
+    case BLOCK_GoToMousePointer: {
+        sp->x = (float)(gs.mouseX - gs.stageX - gs.stageWidth  / 2);
+        sp->y = (float)(gs.stageY + gs.stageHeight / 2 - gs.mouseY);
+        clampToStage(sp, gs);
+        break;
+    }
+    case BLOCK_GoToRandomPosition: {
+        float hw = stageHalfW(gs), hh = stageHalfH(gs);
+        sp->x = -hw + (float)rand() / RAND_MAX * (2 * hw);
+        sp->y = -hh + (float)rand() / RAND_MAX * (2 * hh);
+        break;
+    }
+
+    // LOOKS
+    case BLOCK_Say: {
+        sp->sayText   = block->inputs.empty() ? block->stringValue
+                                              : block->inputs[0]->stringValue;
+        sp->sayTimer   = -1.0f;  // permanent
+        sp->isThinking = false;
+        Logger::info("SAY BLOCK EXECUTED: "+sp->sayText);
+        break;
+    }
+    case BLOCK_SayForSecs: {
+        sp->sayText    = block->inputs.empty() ? block->stringValue
+                                               : block->inputs[0]->stringValue;
+        float secs     = (float)(block->inputs.size() > 1 ? evalNum(block->inputs[1], gs, sp)
+                                                          : block->numberValue);
+        sp->sayTimer   = secs;
+        sp->isThinking = false;
+        break;
+    }
+    case BLOCK_Think: {
+        sp->sayText    = block->inputs.empty() ? block->stringValue
+                                               : block->inputs[0]->stringValue;
+        sp->sayTimer   = -1.0f;
+        sp->isThinking = true;
+        break;
+    }
+    case BLOCK_ThinkForSecs: {
+        sp->sayText    = block->inputs.empty() ? block->stringValue
+                                               : block->inputs[0]->stringValue;
+        float secs     = (float)(block->inputs.size() > 1 ? evalNum(block->inputs[1], gs, sp)
+                                                          : block->numberValue);
+        sp->sayTimer   = secs;
+        sp->isThinking = true;
+        break;
+    }
+    case BLOCK_Show:         sp->visible = true;  break;
+    case BLOCK_Hide:         sp->visible = false; break;
+    case BLOCK_NextCostume: {
+        if (!sp->costumes.empty())
+            sp->currentCostume = (sp->currentCostume + 1) % (int)sp->costumes.size();
+        break;
+    }
+    case BLOCK_SwitchCostume: {
+        for (int i = 0; i < (int)sp->costumes.size(); i++) {
+            if (sp->costumes[i].name == block->stringValue) {
+                sp->currentCostume = i; break;
+            }
+        }
+        break;
+    }
+    case BLOCK_SwitchBackdrop: {
+            Logger::info("SWITCH BACKDROP - START");
+            Logger::info("stringValue: " + block->stringValue);
+
+            if (block->stringValue == "next") {
+                gs.currentColorIndex = (gs.currentColorIndex + 1) % gs.stageColors.size();
+                Logger::info("Next backdrop - new index: " + std::to_string(gs.currentColorIndex));
+            } else {
+                for (int i = 0; i < (int)gs.stageColors.size(); i++) {
+                    if (gs.stageColors[i].name == block->stringValue) {
+                        gs.currentColorIndex = i;
+                        Logger::info("Found backdrop: " + gs.stageColors[i].name + " at index: " + std::to_string(i));
+                        break;
+                    }
+                }
+            }
+
+            gs.stageColor = gs.stageColors[gs.currentColorIndex].color;
+            Logger::info("New stageColor RGB: " +
+                std::to_string(gs.stageColor.r) + "," +
+                std::to_string(gs.stageColor.g) + "," +
+                std::to_string(gs.stageColor.b));
+            break;
+    }
+    case BLOCK_SetSize: {
+        float v = (float)(block->inputs.empty() ? block->numberValue : evalNum(block->inputs[0], gs, sp));
+        sp->size = std::max(1.0f, v);
+        break;
+    }
+    case BLOCK_ChangeSize: {
+        float v = (float)(block->inputs.empty() ? block->numberValue : evalNum(block->inputs[0], gs, sp));
+        sp->size = std::max(1.0f, sp->size + v);
+        break;
+    }
+    case BLOCK_SetColorEffect: {
+        float v = (float)(block->inputs.empty() ? block->numberValue : evalNum(block->inputs[0], gs, sp));
+        sp->colorEffect = std::fmod(std::fabs(v), 360.0f);
+        break;
+    }
+    case BLOCK_ChangeColorEffect: {
+        float v = (float)(block->inputs.empty() ? block->numberValue : evalNum(block->inputs[0], gs, sp));
+        sp->colorEffect = std::fmod(std::fabs(sp->colorEffect + v), 360.0f);
+        break;
+    }
+    case BLOCK_SetGhostEffect:{
+        float v = (float)(block->inputs.empty() ? block->numberValue : evalNum(block->inputs[0], gs, sp));
+        sp->ghostEffect = std::max(0.0f , std::min(100.0f,v));
+        break;
+    }
+    case BLOCK_ChangeGhostEffect:{
+        float v = (float)(block->inputs.empty() ? block->numberValue : evalNum(block->inputs[0], gs, sp));
+        Logger::info("Changing ghost by: " + std::to_string(v));
+        sp->ghostEffect = sp->ghostEffect + v;
+        if (sp->ghostEffect < 0) sp->ghostEffect = 0;
+        if (sp->ghostEffect > 100) sp->ghostEffect = 100;
+        Logger::info("New ghost value: " + std::to_string(sp->ghostEffect));
+    }
+    case BLOCK_SetBrightnessEffect:{
+        float v = (float)(block->inputs.empty() ? block->numberValue : evalNum(block->inputs[0], gs, sp));
+        sp->brightnessEffect = std::max(0.0f, std::min(100.0f, v));
+        Logger::info("brightness set to: " + std::to_string(sp->brightnessEffect));
+        break;
+    }
+    case BLOCK_ChangeBrightnessEffect:{
+        float v = (float)(block->inputs.empty() ? block->numberValue : evalNum(block->inputs[0], gs, sp));
+        sp->brightnessEffect = sp->brightnessEffect + v;
+        if (sp->brightnessEffect < 0) sp->brightnessEffect = 0;
+        if (sp->brightnessEffect > 100) sp->brightnessEffect = 100;
+        Logger::info("brightness changed by: " + std::to_string(sp->brightnessEffect));
+        break;
+    }
+    case BLOCK_SetSaturationEffect:{
+            float v = (float)(block->inputs.empty() ? block->numberValue : evalNum(block->inputs[0], gs, sp));
+            sp->saturationEffect = std::max(0.0f, std::min(100.0f, v));
+            Logger::info("saturation set to: " + std::to_string(sp->saturationEffect));
+            break;
+    }
+    case BLOCK_ChangeSaturationEffect:{
+            float v = (float)(block->inputs.empty() ? block->numberValue : evalNum(block->inputs[0], gs, sp));
+            sp->saturationEffect = sp->saturationEffect + v;
+            if (sp->saturationEffect < 0) sp->saturationEffect = 0;
+            if (sp->saturationEffect > 100) sp->saturationEffect = 100;
+            Logger::info("Saturation changed by: " + std::to_string(sp->saturationEffect));
+            break;
+    }
+    case BLOCK_ClearGraphicEffects:
+        sp->colorEffect = 0; sp->ghostEffect = 0; sp->brightnessEffect = 0; sp->saturationEffect = 0;
+        break;
+    case BLOCK_GoToFrontLayer: sp->layer = 999;  break;
+    case BLOCK_GoToBackLayer:  sp->layer = -999; break;
+    case BLOCK_GoForwardLayers: {
+        int v = (int)(block->inputs.empty() ? block->numberValue : evalNum(block->inputs[0], gs, sp));
+        sp->layer += v;
+        break;
+    }
+    case BLOCK_GoBackwardLayers: {
+        int v = (int)(block->inputs.empty() ? block->numberValue : evalNum(block->inputs[0], gs, sp));
+        sp->layer -= v;
+        break;
+    }
+
+    //  SOUND   [   Honestly , wont work :) ]
+    case BLOCK_StopAllSounds:
+        Mix_HaltChannel(-1);
+        Logger::info("All sounds stopped");
+        break;
+    case BLOCK_SetVolume: {
+        int v = (int)(block->inputs.empty() ? block->numberValue : evalNum(block->inputs[0], gs, sp));
+        gs.globalVolume = std::max(0, std::min(100, v));
+        Mix_Volume(-1, gs.globalVolume * MIX_MAX_VOLUME / 100);
+        break;
+    }
+    case BLOCK_ChangeVolume: {
+        int delta = (int)(block->inputs.empty() ? block->numberValue : evalNum(block->inputs[0], gs, sp));
+        gs.globalVolume = std::max(0, std::min(100, gs.globalVolume + delta));
+        Mix_Volume(-1, gs.globalVolume * MIX_MAX_VOLUME / 100);
+        break;
+    }
+
+    // ── EVENTS ───────────────────────────────────────────────────────────────
+    case BLOCK_Broadcast: {
+        gs.exec.pendingBroadcast = block->stringValue;
+        Logger::info("Broadcast: " + block->stringValue);
+        break;
+    }
+
+    // ── CONTROL ──────────────────────────────────────────────────────────────
+    case BLOCK_Wait: {
+        float secs = (float)(block->inputs.empty() ? block->numberValue : evalNum(block->inputs[0], gs, sp));
+        ctx.waitTimer = secs;
+        // Do NOT advance PC yet; update() will advance when timer expires
+        Logger::info(logMsg.str() + " -> waiting " + std::to_string(secs) + "s");
+        return false; // suspend
+    }
+    case BLOCK_WaitUntil: {
+        ctx.waitUntilActive = true;
+        // Don't advance; update() polls condition
+        return false;
+    }
+    case BLOCK_Repeat: {
+        int count = (int)(block->inputs.empty() ? block->numberValue : evalNum(block->inputs[0], gs, sp));
+        // Execute nested blocks 'count' times inline
+        for (int i = 0; i < count; i++) {
+            SpriteExecCtx innerCtx;
+            while (!innerCtx.finished) {
+                executeOneBlock(gs, sp, innerCtx, block->nested);
+                innerCtx.pc++;
+                if (innerCtx.pc >= (int)block->nested.size()) innerCtx.finished = true;
+                if (!gs.exec.running) goto done;
+            }
+        }
+        break;
+    }
+    case BLOCK_RepeatUntil: {
+        while (!evalBool(block->inputs.empty() ? nullptr : block->inputs[0], gs, sp)) {
+            SpriteExecCtx innerCtx;
+            while (!innerCtx.finished) {
+                executeOneBlock(gs, sp, innerCtx, block->nested);
+                innerCtx.pc++;
+                if (innerCtx.pc >= (int)block->nested.size()) innerCtx.finished = true;
+                if (!gs.exec.running) goto done;
+                gs.watchdogCounter++;
+                if (gs.watchdogCounter > GameState::WATCHDOG_LIMIT) {
+                    Logger::warning("Infinite loop detected in RepeatUntil!");
+                    gs.exec.running = false;
+                    goto done;
+                }
+            }
+        }
+        break;
+    }
+    case BLOCK_Forever: {
+        // Infinite loop — watchdog guards it
+        while (gs.exec.running && !gs.exec.paused) {
+            SpriteExecCtx innerCtx;
+            while (!innerCtx.finished) {
+                executeOneBlock(gs, sp, innerCtx, block->nested);
+                innerCtx.pc++;
+                if (innerCtx.pc >= (int)block->nested.size()) innerCtx.finished = true;
+                if (!gs.exec.running) goto done;
+                gs.watchdogCounter++;
+                if (gs.watchdogCounter > GameState::WATCHDOG_LIMIT) {
+                    Logger::warning("Infinite loop detected! Stopping execution");
+                    gs.exec.running = false;
+                    ctx.finished = true;
+                    return false;
+                }
+            }
+        }
+        goto done;
+    }
+    case BLOCK_If: {
+        bool cond = block->inputs.empty() ? false : evalBool(block->inputs[0], gs, sp);
+        if (cond) {
+            SpriteExecCtx innerCtx;
+            while (!innerCtx.finished) {
+                executeOneBlock(gs, sp, innerCtx, block->nested);
+                innerCtx.pc++;
+                if (innerCtx.pc >= (int)block->nested.size()) innerCtx.finished = true;
+            }
+        }
+        break;
+    }
+    case BLOCK_IfElse: {
+        bool cond = block->inputs.empty() ? false : evalBool(block->inputs[0], gs, sp);
+        const auto& branch = cond ? block->nested : block->nested2;
+        SpriteExecCtx innerCtx;
+        while (!innerCtx.finished) {
+            executeOneBlock(gs, sp, innerCtx, branch);
+            innerCtx.pc++;
+            if (innerCtx.pc >= (int)branch.size()) innerCtx.finished = true;
+        }
+        break;
+    }
+    case BLOCK_Stop: {
+        gs.exec.running = false;
+        ctx.finished    = true;
+        Logger::info("Stop all");
+        return false;
+    }
+    case BLOCK_AskWait: {
+        gs.askActive   = true;
+        gs.askQuestion = block->stringValue;
+        gs.askInput    = "";
+        gs.askSprite   = sp;
+        ctx.askWaiting = true;
+        return false; // suspend until user answers
+    }
+
+    // ── VARIABLES ────────────────────────────────────────────────────────────
+    case BLOCK_SetVariable: {
+        std::string val;
+        if (!block->inputs.empty()) {
+            double d = evalNum(block->inputs[0], gs, sp);
+            std::ostringstream ss; ss << d; val = ss.str();
+        } else {
+            val = block->stringValue.empty()
+                ? std::to_string(block->numberValue)
+                : block->stringValue;
+        }
+        if (gs.variables.find(block->text) != gs.variables.end())
+        {
+            Logger::warning("Variable '" + block->text + "' already exists! Overwriting.");
+        }
+        gs.variables[block->text] = val;
+        Logger::info("Set var [" + block->text + "] = " + val);
+        break;
+    }
+    case BLOCK_ChangeVariable: {
+        double cur = 0;
+        auto it = gs.variables.find(block->text);
+        if (it != gs.variables.end()) try { cur = std::stod(it->second); } catch(...) {}
+        double delta = block->inputs.empty() ? block->numberValue : evalNum(block->inputs[0], gs, sp);
+        std::ostringstream ss; ss << (cur + delta);
+        gs.variables[block->text] = ss.str();
+        break;
+    }
+
+    // ── PEN ──────────────────────────────────────────────────────────────────
+    case BLOCK_PenDown:
+        sp->penDown = true;
+        Logger::info("PEN DOWN - sprite: " + sp->name + "pendown: " + std::to_string(sp->penDown));
+        break;
+    case BLOCK_PenUp:
+        sp->penDown = false;
+        if (gs.isDrawingStroke && gs.currentStroke.points.size() > 1)
+            gs.penStrokes.push_back(gs.currentStroke);
+        gs.isDrawingStroke = false;
+        break;
+    case BLOCK_PenClear:
+        gs.penStrokes.clear();
+        gs.isDrawingStroke = false;
+        break;
+    case BLOCK_SetPenColor: {
+        // Cycle preset colours when no input
+        static const SDL_Color COLORS[] = {
+            {255,0,0,255},{0,255,0,255},{0,0,255,255},
+            {255,255,0,255},{255,0,255,255},{0,255,255,255},
+            {255,128,0,255},{128,0,255,255}
+        };
+        static int ci = 0;
+        sp->penColor = COLORS[(ci++) % 8];
+        break;
+    }
+    case BLOCK_SetPenSize: {
+        int v = (int)(block->inputs.empty() ? block->numberValue : evalNum(block->inputs[0], gs, sp));
+        sp->penSize = std::max(1, std::min(50, v));
+        break;
+    }
+    case BLOCK_ChangePenSize: {
+        int v = (int)(block->inputs.empty() ? block->numberValue : evalNum(block->inputs[0], gs, sp));
+        sp->penSize = std::max(1, std::min(50, sp->penSize + v));
+        break;
+    }
+    case BLOCK_Stamp: {
+        // Stamp current sprite position as a freeze-frame (stored as a special stroke)
+        PenStroke stamp;
+        stamp.color = sp->penColor;
+        stamp.size  = 0; // size=0 signals "stamp" to renderer
+        SDL_Point p;
+        p.x = (int)sp->x;
+        p.y = (int)sp->y;
+        stamp.points.push_back(p);
+        stamp.points.push_back(p); // two identical points = stamp marker
+        gs.penStrokes.push_back(stamp);
+        break;
+    }
+
+    // ── SENSING (reporter blocks, no side-effects here) ───────────────────
+    case BLOCK_ResetTimer:
+        gs.exec.globalTimer = 0;
+        break;
+
+    default:
+        break;
+    }
+
+    done:
+    // Note: goto done is used for early exit (Stop, Forever).
+    // In those cases finished=true or running=false, so pc++ is harmless
+    // but we guard anyway.
+    if (!ctx.finished) {
+        ctx.pc++;
+        gs.watchdogCounter = 0;
+    }
+    return !ctx.finished;
+}
+
+// ─── update (called once per frame) ──────────────────────────────────────────
+void update(GameState& state, float deltaTime) {
+    // 1. Update timers / speech bubbles
+    for (auto* sp : state.sprites) {
+        if (sp->sayTimer > 0) {
+            sp->sayTimer -= deltaTime;
+            if (sp->sayTimer <= 0) sp->sayText = "";
+        }
+    }
+
+    // 2. Global timer
+    if (state.exec.running)
+        state.exec.globalTimer += deltaTime;
+
+    // 3. Run scripts if green flag was clicked
+    if (state.greenFlagClicked && !state.exec.running) {
+        state.greenFlagClicked = false;
+        startExecution(state);
+    }
+
+    // ===== WhenSpriteClicked =====
+    if (state.mousePressed && state.exec.running) {
+        Logger::info("Mouse clicked detected in update!");
+
+        int mx = state.mouseX;
+        int my = state.mouseY;
+
+        for (Block* b : state.editorBlocks) {
+            if (b->type == BLOCK_WhenSpriteClicked) {
+                if (state.selectedSpriteIndex >= 0) {
+                    Sprite* sp = state.sprites[state.selectedSpriteIndex];
+                    state.exec.ctx[sp].finished = false;
+                    Logger::info("WhenSpriteClicked activated by mouse!");
+                }
+            }
+        }
+    }
+
+    // 4. Pause / step gate
+    if (!state.exec.running) return;
+    if (state.exec.paused) {
+        if (state.stepMode && state.stepNext) {
+            state.stepNext = false;
+            // fall through to execute exactly one block
+        } else {
+            return;
+        }
+    }
+
+    // 5. Execute scripts for each sprite
+    runScripts(state, deltaTime);
+
+    // 6. Pen drawing: append current sprite position to active stroke
+    if (state.selectedSpriteIndex >= 0 &&
+        state.selectedSpriteIndex < (int)state.sprites.size())
+    {
+        Sprite* sp = state.sprites[state.selectedSpriteIndex];
+        if (sp->penDown && state.exec.running) {
+            SDL_Point p;
+            int stageOX = state.stageX + state.stageWidth  / 2;
+            int stageOY = state.stageY + state.stageHeight / 2;
+            p.x = (int)sp->x;
+            p.y = (int)sp->y; // Y flipped
+
+            if (!state.isDrawingStroke) {
+                Logger::info("PEN DRAWING - sprite" + sp->name + "at x: " + std::to_string(sp->x) + " y: " + std::to_string(sp->y));
+                state.currentStroke = PenStroke();
+                state.currentStroke.color = sp->penColor;
+                state.currentStroke.size  = sp->penSize;
+                state.currentStroke.points.push_back(p);
+                state.isDrawingStroke = true;
+            } else {
+                auto& last = state.currentStroke.points;
+                if (last.empty() || last.back().x != p.x || last.back().y != p.y)
+                    last.push_back(p);
+            }
+        } else if (state.isDrawingStroke && !sp->penDown) {
+            if (state.currentStroke.points.size() > 1)
+                state.penStrokes.push_back(state.currentStroke);
+            state.isDrawingStroke = false;
+        }
+    }
+
+    // Pen drawing: append current sprite position to active stroke
+    if (state.selectedSpriteIndex >= 0 &&
+        state.selectedSpriteIndex < (int)state.sprites.size())
+    {
+        Sprite* sp = state.sprites[state.selectedSpriteIndex];
+        if (sp->penDown && state.exec.running) {
+            Logger::info("PEN - sprite at x:" + std::to_string(sp->x) + " y:" + std::to_string(sp->y));
+
+            SDL_Point p;
+            int stageOX = state.stageX + state.stageWidth  / 2;
+            int stageOY = state.stageY + state.stageHeight / 2;
+            p.x = stageOX + (int)sp->x;
+            p.y = stageOY - (int)sp->y;
+
+            if (!state.isDrawingStroke) {
+                state.currentStroke = PenStroke();
+                state.currentStroke.color = sp->penColor;
+                state.currentStroke.size  = sp->penSize;
+                state.currentStroke.points.push_back(p);
+                state.isDrawingStroke = true;
+                Logger::info("PEN - started new stroke at (" + std::to_string(p.x) + "," + std::to_string(p.y) + ")");
+            } else {
+                auto& last = state.currentStroke.points;
+                if (last.empty() || last.back().x != p.x || last.back().y != p.y) {
+                    last.push_back(p);
+                    Logger::info("PEN - added point (" + std::to_string(p.x) + "," + std::to_string(p.y) + ")");
+                }
+            }
+        } else if (state.isDrawingStroke && !sp->penDown) {
+            if (state.currentStroke.points.size() > 1)
+                state.penStrokes.push_back(state.currentStroke);
+            state.isDrawingStroke = false;
+            Logger::info("PEN - stroke finished");
         }
     }
 }
 
+// ─── start execution (reset PCs) ─────────────────────────────────────────────
+void startExecution(GameState& state) {
+    state.exec.running = true;
+    state.exec.paused  = false;
+    state.exec.ctx.clear();
+    state.watchdogCounter = 0;
+    state.exec.globalTimer = 0;
+
+
+    const Uint8* ks = SDL_GetKeyboardState(nullptr);
+    for (auto* sp : state.sprites) {
+        for (Block* b : sp->scripts) {
+            if (b->type == BLOCK_WhenKeyPressed) {
+                std::string key = b->stringValue;
+                bool pressed = false;
+                if (key == "space") pressed = ks[SDL_SCANCODE_SPACE];
+                else if (key == "up") pressed = ks[SDL_SCANCODE_UP];
+                else if (key == "down") pressed = ks[SDL_SCANCODE_DOWN];
+                else if (key == "left") pressed = ks[SDL_SCANCODE_LEFT];
+                else if (key == "right") pressed = ks[SDL_SCANCODE_RIGHT];
+
+                if (pressed) {
+                    state.exec.ctx[sp] = SpriteExecCtx();
+                    state.exec.ctx[sp].finished = false;
+                    Logger::info("Key pressed: " + key);
+                }
+            }
+        }
+    }
+
+    if (!state.exec.pendingBroadcast.empty()) {
+        Logger::info("Processing broadcast: " + state.exec.pendingBroadcast);
+
+        for (Block* b : state.editorBlocks) {
+            if (b->type == BLOCK_WhenReceive && b->stringValue == state.exec.pendingBroadcast) {
+                if (state.selectedSpriteIndex >= 0) {
+                    Sprite* sp = state.sprites[state.selectedSpriteIndex];
+                    state.exec.ctx[sp] = SpriteExecCtx();
+                    state.exec.ctx[sp].finished = false;
+                    Logger::info("Receive block activated for: " + b->stringValue);
+                }
+            }
+        }
+        state.exec.pendingBroadcast = "";  // پاکش کن
+    }
+    if (state.mousePressed)
+    {
+        for (Block* b : state.editorBlocks)
+        {
+            if (b->type == BLOCK_WhenSpriteClicked)
+            {
+                if (state.selectedSpriteIndex >= 0)
+                {
+                    Sprite* sp = state.sprites[state.selectedSpriteIndex];
+                    state.exec.ctx[sp] = SpriteExecCtx();
+                    state.exec.ctx[sp].finished = false;
+                    Logger::info("Sprite clicked!");
+                }
+            }
+        }
+    }
+
+    for (auto* sp : state.sprites) {
+        SpriteExecCtx ctx;
+        state.exec.ctx[sp] = ctx;
+    }
+    Logger::info("Execution started — " + std::to_string(state.sprites.size()) + " sprite(s)");
 }
 
+// ─── run scripts (one step per sprite per frame) ─────────────────────────────
+void runScripts(GameState& state, float deltaTime) {
+    if (state.editorBlocks.empty()) {
+        state.exec.running = false;
+        return;
+    }
+
+    for (auto* sp : state.sprites) {
+        if (state.exec.ctx.find(sp) == state.exec.ctx.end()) continue;
+        SpriteExecCtx& ctx = state.exec.ctx[sp];
+
+        if (ctx.finished || ctx.askWaiting) continue;
+
+        // Waiting for timer (BLOCK_Wait)
+        if (ctx.waitTimer > 0) {
+            ctx.waitTimer -= deltaTime;
+            if (ctx.waitTimer > 0) continue;
+            ctx.waitTimer = 0;
+            ctx.pc++; // advance past the wait block
+        }
+
+        // Answer received from ask dialog
+        if (ctx.askWaiting && !state.askActive) {
+            sp->answer     = state.askInput;
+            ctx.askWaiting = false;
+            ctx.pc++;
+        }
+
+        // Execute blocks until suspension or end
+        int maxPerFrame = 200;
+        while (!ctx.finished && ctx.waitTimer <= 0 && !ctx.askWaiting && maxPerFrame-- > 0) {
+            if (ctx.pc >= (int)state.editorBlocks.size()) {
+                ctx.finished = true;
+                break;
+            }
+            bool cont = executeOneBlock(state, sp, ctx, state.editorBlocks);
+            if (!cont) break;
+        }
+    }
+
+    // Check if all scripts finished
+    bool anyRunning = false;
+    for (auto& kv : state.exec.ctx)
+        if (!kv.second.finished) anyRunning = true;
+    if (!anyRunning) state.exec.running = false;
+}
+
+} // namespace Engine
