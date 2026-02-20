@@ -16,6 +16,7 @@ namespace Renderer {
     void renderSnapPreview    (GameState& state);
     void renderExecutionCursor(GameState& state);
 
+
     SDL_Color getCategoryColor(BlockCategory cat);
     void renderText(GameState& state, const std::string& text,
                     int x, int y, SDL_Color color);
