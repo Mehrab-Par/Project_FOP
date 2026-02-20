@@ -1,35 +1,22 @@
 #pragma once
 #include "GameState.h"
 
-// ─────────────────────────────────────────────
-// Renderer — all SDL drawing
-// ─────────────────────────────────────────────
 namespace Renderer {
-    void init(GameState& state);
-    void shutdown(GameState& state);
-    void renderFrame(GameState& state);
-    // ── Sub-renderers ──
-    void renderBackground(GameState& state);
-    void renderStage(GameState& state);
-    void renderBackdrop(GameState& state);
-    void renderPenDrawings(GameState& state);
-    void renderSprites(GameState& state);
-    void renderSpeechBubbles(GameState& state);
-    void renderUI(GameState& state);
-    void renderSpritePanel(GameState& state);
-    void renderCodeEditor(GameState& state);
-    void renderBlockPalette(GameState& state);
-    void renderVariableMonitors(GameState& state);
-    void renderLogOverlay(GameState& state);
-    void renderAskDialog(GameState& state);
-    void renderPenExtensionBlocks(GameState& state);
-    void renderExecutionControls(GameState& state);
+    void render(GameState& state);
+    void renderPaletteBlocks  (GameState& state);
+    void renderEditorBlocks   (GameState& state);
+    void renderStageContent   (GameState& state);
+    void renderTopBar         (GameState& state);
+    void renderPalette        (GameState& state);
+    void renderEditor         (GameState& state);
+    void renderStage          (GameState& state);
+    void renderBlock          (GameState& state, Block* block, bool ghost = false);
+    void renderAskDialog      (GameState& state);
+    void renderVariableMonitor(GameState& state);
+    void renderSnapPreview    (GameState& state);
+    void renderExecutionCursor(GameState& state);
 
-    // ── Helpers ──
-    void drawRect(SDL_Renderer* r, int x, int y, int w, int h, SDL_Color c);
-    void drawFilledRect(SDL_Renderer* r, int x, int y, int w, int h, SDL_Color c);
-    void drawText(SDL_Renderer* r, const std::string& text, int x, int y, SDL_Color c, int fontSize = 14);
-    void drawLine(SDL_Renderer* r, int x1, int y1, int x2, int y2, SDL_Color c, int thickness = 1);
-    void drawCircle(SDL_Renderer* r, int cx, int cy, int radius, SDL_Color c);
-    void drawFilledCircle(SDL_Renderer* r, int cx, int cy, int radius, SDL_Color c);
+    SDL_Color getCategoryColor(BlockCategory cat);
+    void renderText(GameState& state, const std::string& text,
+                    int x, int y, SDL_Color color);
 }
