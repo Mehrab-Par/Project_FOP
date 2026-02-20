@@ -1,8 +1,7 @@
 #include "UIManager.h"
 #include <cstring>
-#include "Logger.h"
 
-// ─── 5x7 pixel font (printable ASCII 32-126)
+// ─── 5x7 pixel font (printable ASCII 32-126) ────────────────────────────────
 static const unsigned char FONT5x7[95][7] = {
 {0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // space
 {0x04,0x04,0x04,0x04,0x00,0x04,0x00}, // !
@@ -130,10 +129,7 @@ void UIManager::drawText(SDL_Renderer* r, const std::string& txt,
 
 UIManager::UIManager()
     : W(1280), H(720), spriteCount(1), selectedIdx(0),
-      lastSelectedSpriteIndex(0),
-      showLog(true),
-      palScrollY(0), palContentHeight(2000), selectedCatTab(0),
-      showSaveDialog(false), saveConfrimed(false) {}
+      palScrollY(0), palContentHeight(2000), selectedCatTab(0) {}
 UIManager::~UIManager() {}
 
 void UIManager::init(int w, int h) {
@@ -193,4 +189,281 @@ void UIManager::buildButtons() {
     ab.rect={8,sprBar.rect.y+10,58,28};
     ab.color={60,120,170,255}; ab.hoverColor={80,140,190,255};
     sprBtns.push_back(ab);
+}
+
+// ─── render ──────────────────────────────────────────────────────────────────
+
+void UIManager::render(SDL_Renderer* r, GameState& state) {
+    // Menu bar
+    SDL_SetRenderDrawColor(r,55,55,55,255);
+    SDL_RenderFillRect(r,&menuBar.rect);
+    for (auto& b:menuBtns) renderButton(r,b);
+
+    // Palette + editor panels
+    renderPanel(r,palPanel);
+    renderPanel(r,edPanel);
+    drawText(r,"Code Editor",edPanel.rect.x+6,edPanel.rect.y+6,{80,80,80,255});
+
+    // Category tab bar inside palette (top of palette)
+    renderCategoryTabs(r);
+
+    // Scrollbar on right edge of palette
+    renderScrollBar(r);
+
+    // Stage border + white fill
+    SDL_SetRenderDrawColor(r,160,160,160,255);
+    SDL_Rect sb={stagePanel.rect.x-2,stagePanel.rect.y-2,
+                 stagePanel.rect.w+4,stagePanel.rect.h+4};
+    SDL_RenderFillRect(r,&sb);
+    SDL_SetRenderDrawColor(r,255,255,255,255);
+    SDL_RenderFillRect(r,&stagePanel.rect);
+
+    // Sprite bar + log
+    renderSprBar(r,state);
+    if (logPanel.visible) renderLog(r);
+}
+
+void UIManager::renderCategoryTabs(SDL_Renderer* r) {
+    // Tab bar sits just below palette top label
+    const int TAB_Y  = palPanel.rect.y + 2;
+    const int TAB_H  = CAT_TAB_H;
+    const int PAL_X  = palPanel.rect.x;
+    const int PAL_W  = palPanel.rect.w - 8; // leave room for scrollbar
+
+    // Category names + colors (index 0 = ALL)
+    struct Cat { const char* name; SDL_Color col; };
+    Cat cats[] = {
+        {"ALL",  {90,90,90,255}},
+        {"Move", {76,151,255,255}},
+        {"Look", {153,102,255,255}},
+        {"Ctrl", {255,171,25,255}},
+        {"Ops",  {89,203,94,255}},
+        {"Vars", {255,140,26,255}},
+        {"Pen",  {15,189,140,255}},
+    };
+    const int N = 7;
+    int tabW = PAL_W / N;
+
+    for (int i = 0; i < N; i++) {
+        SDL_Rect tab = {PAL_X + i*tabW, TAB_Y, tabW, TAB_H};
+        SDL_Color c  = cats[i].col;
+        if (i == selectedCatTab) {
+            SDL_SetRenderDrawColor(r, c.r, c.g, c.b, 255);
+        } else {
+            SDL_SetRenderDrawColor(r,
+                (Uint8)(c.r*0.45f), (Uint8)(c.g*0.45f), (Uint8)(c.b*0.45f), 255);
+        }
+        SDL_RenderFillRect(r, &tab);
+
+        // border
+        SDL_SetRenderDrawColor(r, 30,30,30,255);
+        SDL_RenderDrawRect(r, &tab);
+
+        // label centred
+        int tw = (int)strlen(cats[i].name)*6;
+        int tx = tab.x + (tab.w - tw)/2;
+        int ty = tab.y + (tab.h - 7)/2;
+        drawText(r, cats[i].name, tx, ty, {255,255,255,255});
+    }
+}
+
+void UIManager::renderScrollBar(SDL_Renderer* r) {
+    // Scrollbar on right edge of palette panel
+    const int SB_W   = 7;
+    const int SB_X   = palPanel.rect.x + palPanel.rect.w - SB_W - 1;
+    const int SB_Y   = palPanel.rect.y + CAT_TAB_H + 4;
+    const int SB_H   = palPanel.rect.h - CAT_TAB_H - 6;
+
+    // Track
+    SDL_Rect track = {SB_X, SB_Y, SB_W, SB_H};
+    SDL_SetRenderDrawColor(r, 210,210,210,255);
+    SDL_RenderFillRect(r, &track);
+
+    // Thumb
+    int visibleH = palPanel.rect.h - CAT_TAB_H - 6;
+    int totalH   = (palContentHeight > visibleH) ? palContentHeight : visibleH;
+    float ratio  = (float)visibleH / totalH;
+    int thumbH   = (int)(SB_H * ratio);
+    if (thumbH < 20) thumbH = 20;
+    float scrollRatio = (totalH > visibleH)
+                        ? (float)palScrollY / (totalH - visibleH) : 0.f;
+    int thumbY = SB_Y + (int)((SB_H - thumbH) * scrollRatio);
+
+    SDL_Rect thumb = {SB_X, thumbY, SB_W, thumbH};
+    SDL_SetRenderDrawColor(r, 140,140,140,255);
+    SDL_RenderFillRect(r, &thumb);
+}
+
+void UIManager::renderPanel(SDL_Renderer* r, const UIPanel& p) {
+    SDL_SetRenderDrawColor(r,p.bgColor.r,p.bgColor.g,p.bgColor.b,255);
+    SDL_RenderFillRect(r,&p.rect);
+    SDL_SetRenderDrawColor(r,190,190,190,255);
+    SDL_RenderDrawRect(r,&p.rect);
+}
+
+void UIManager::renderButton(SDL_Renderer* r, const Button& b) {
+    SDL_Color c = b.isHovered ? b.hoverColor : b.color;
+    SDL_SetRenderDrawColor(r,c.r,c.g,c.b,255);
+    SDL_RenderFillRect(r,&b.rect);
+    SDL_SetRenderDrawColor(r,0,0,0,100);
+    SDL_RenderDrawRect(r,&b.rect);
+    // Centre text manually
+    int tw = (int)b.label.size() * 6;
+    int tx = b.rect.x + (b.rect.w - tw)/2;
+    int ty = b.rect.y + (b.rect.h - 7)/2;
+    drawText(r, b.label, tx, ty, {255,255,255,255});
+}
+
+void UIManager::renderLog(SDL_Renderer* r) {
+    SDL_SetRenderDrawColor(r,25,25,25,255);
+    SDL_RenderFillRect(r,&logPanel.rect);
+    SDL_SetRenderDrawColor(r,70,70,70,255);
+    SDL_RenderDrawRect(r,&logPanel.rect);
+
+    // Title strip
+    SDL_Rect ts={logPanel.rect.x,logPanel.rect.y,logPanel.rect.w,16};
+    SDL_SetRenderDrawColor(r,45,45,45,255);
+    SDL_RenderFillRect(r,&ts);
+    drawText(r,"Console",logPanel.rect.x+4,logPanel.rect.y+4,{170,170,170,255});
+    drawText(r,"Clear",logPanel.rect.x+logPanel.rect.w-34,logPanel.rect.y+4,{255,80,80,255});
+
+    int lh=12, yp=logPanel.rect.y+20;
+    int maxL=(logPanel.rect.h-22)/lh;
+    int start=(int)logs.size()>maxL?(int)logs.size()-maxL:0;
+    for (int i=start;i<(int)logs.size()&&yp<logPanel.rect.y+logPanel.rect.h-4;i++) {
+        SDL_Color col={140,140,140,255};
+        if      (logs[i].level=="ERROR")   col={255,90,90,255};
+        else if (logs[i].level=="WARNING") col={255,200,60,255};
+        else if (logs[i].level=="INFO")    col={70,190,255,255};
+        std::string line="["+logs[i].level+"] "+logs[i].msg;
+        if ((int)line.size()>40) line=line.substr(0,40)+"...";
+        drawText(r,line,logPanel.rect.x+4,yp,col);
+        yp+=lh;
+    }
+}
+
+void UIManager::renderSprBar(SDL_Renderer* r,GameState& state) {
+    SDL_SetRenderDrawColor(r,235,235,235,255);
+    SDL_RenderFillRect(r,&sprBar.rect);
+    SDL_SetRenderDrawColor(r,190,190,190,255);
+    SDL_RenderDrawRect(r,&sprBar.rect);
+    drawText(r,"Sprites",8,sprBar.rect.y+4,{80,80,80,255});
+
+    for (auto& b:sprBtns) renderButton(r,b);
+
+    int sx=76, sy=sprBar.rect.y+8, sz=78, gap=6;
+    for (int i=0;i<spriteCount;i++) {
+        if (i==selectedIdx) {
+            SDL_SetRenderDrawColor(r,76,151,255,255);
+            SDL_Rect hi={sx-2,sy-2,sz+4,sz+4};
+            SDL_RenderFillRect(r,&hi);
+        }
+        SDL_Rect box={sx,sy,sz,sz};
+        SDL_SetRenderDrawColor(r,255,255,255,255);
+        SDL_RenderFillRect(r,&box);
+        SDL_SetRenderDrawColor(r,170,170,170,255);
+        SDL_RenderDrawRect(r,&box);
+        // Mini sprite icon
+        SDL_SetRenderDrawColor(r,76,151,255,180);
+        SDL_Rect icon={sx+24,sy+16,30,30};
+        SDL_RenderFillRect(r,&icon);
+
+        std::string nm="Spr"+std::to_string(i+1);
+        drawText(r,nm,sx+10,sy+sz-14,{60,60,60,255});
+        sx+=sz+gap;
+    }
+
+    int vy = sprBar.rect.y + sprBar.rect.h-30;
+    drawText(r,"Variables",sx,vy,{80,80,80,255});
+    vy+=15;
+    int vx = 8;
+    for (auto& var : state.variables)
+    {
+        std::string text= var.first + ": " + var.second;
+        drawText(r,text,sx,vy,{200,100,50,255});
+        vx+=120;
+        if (vx>300)
+        {
+            vx = 8;
+            vy += 15;
+        }
+    }
+}
+
+// ─── input ───────────────────────────────────────────────────────────────────
+
+void UIManager::handleMouseMove(int x,int y) {
+    for (auto& b:menuBtns) b.isHovered=hit(x,y,b.rect);
+    for (auto& b:sprBtns)  b.isHovered=hit(x,y,b.rect);
+}
+
+void UIManager::handleMouseWheel(int mx, int /*my*/, int deltaY) {
+    // Only scroll when mouse is over palette
+    if (mx >= palPanel.rect.x && mx < palPanel.rect.x + palPanel.rect.w) {
+        palScrollY -= deltaY * PAL_SCROLL_STEP;
+        // clamp
+        int visH   = palPanel.rect.h - CAT_TAB_H - 6;
+        int maxScroll = palContentHeight - visH;
+        if (maxScroll < 0) maxScroll = 0;
+        if (palScrollY < 0)         palScrollY = 0;
+        if (palScrollY > maxScroll) palScrollY = maxScroll;
+    }
+}
+
+void UIManager::handleMouseClick(int x,int y,bool down) {
+    if (!down) return;
+
+    // ── Category tabs ──────────────────────────────────────────────────────
+    const int TAB_Y = palPanel.rect.y + 2;
+    const int TAB_H = CAT_TAB_H;
+    const int PAL_W = palPanel.rect.w - 8;
+    const int N = 7;
+    int tabW = PAL_W / N;
+    if (y >= TAB_Y && y < TAB_Y + TAB_H &&
+        x >= palPanel.rect.x && x < palPanel.rect.x + PAL_W) {
+        int tab = (x - palPanel.rect.x) / tabW;
+        if (tab >= 0 && tab < N) {
+            selectedCatTab = tab;
+            palScrollY = 0;   // jump to top on category change
+            return;
+        }
+    }
+
+    for (auto& b:menuBtns) { if(hit(x,y,b.rect)){b.isPressed=true;if(b.id==BTN_TOGGLE_LOG)toggleLogPanel();return;} }
+    for (auto& b:sprBtns)  { if(hit(x,y,b.rect)){b.isPressed=true;return;} }
+
+    // Sprite selection
+    int sx=76,sy=sprBar.rect.y+8,sz=78,gap=6;
+    for (int i=0;i<spriteCount;i++) {
+        SDL_Rect box={sx,sy,sz,sz};
+        if (hit(x,y,box)){selectedIdx=i;return;}
+        sx+=sz+gap;
+    }
+    // Clear log button
+    if (logPanel.visible) {
+        SDL_Rect clr={logPanel.rect.x+logPanel.rect.w-38,logPanel.rect.y+2,36,14};
+        if (hit(x,y,clr)) clearLogs();
+    }
+}
+
+bool UIManager::isButtonPressed(int id) const {
+    for (auto& b:menuBtns) if(b.id==id&&b.isPressed)return true;
+    for (auto& b:sprBtns)  if(b.id==id&&b.isPressed)return true;
+    return false;
+}
+
+void UIManager::resetButtons() {
+    for (auto& b:menuBtns) b.isPressed=false;
+    for (auto& b:sprBtns)  b.isPressed=false;
+}
+
+void UIManager::addLog(const std::string& msg,const std::string& level) {
+    logs.push_back({msg,level});
+    if ((int)logs.size()>80) logs.erase(logs.begin());
+}
+void UIManager::clearLogs()  { logs.clear(); }
+void UIManager::toggleLogPanel() { logPanel.visible=!logPanel.visible; }
+
+bool UIManager::hit(int x,int y,const SDL_Rect& r) const {
+    return x>=r.x&&x<=r.x+r.w&&y>=r.y&&y<=r.y+r.h;
 }
