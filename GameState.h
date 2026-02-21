@@ -4,9 +4,9 @@
 #include <map>
 #include <SDL2/SDL.h>
 
-// ─────────────────────────────────────────────────────────────────────────────
+
 // Block types  (all Scratch categories)
-// ─────────────────────────────────────────────────────────────────────────────
+
 enum BlockType {
     // Motion (blue)
     BLOCK_Move, BLOCK_TurnRight, BLOCK_TurnLeft,
