@@ -5,7 +5,7 @@
 
 namespace Logger {
     enum class Level { INFO, WARNING, ERROR_LVL };
-    
+
     void init(const std::string& filename = "scratch.log");
     void log(Level level, const std::string& message);
     void info(const std::string& msg);
