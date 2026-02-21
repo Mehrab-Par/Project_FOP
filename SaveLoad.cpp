@@ -300,4 +300,4 @@ bool loadProject(GameState& state, const std::string& filename) {
 
 std::string getDefaultSavePath() { return "scratch_project.sav"; }
 
-} // namespace SaveLoad
+}
