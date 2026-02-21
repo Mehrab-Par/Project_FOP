@@ -1,5 +1,6 @@
 #include "Renderer.h"
 #include "UIManager.h"
+// NO SDL_ttf - uses pixel font from UIManager pattern
 #include <iostream>
 #include "Logger.h"
 #include <cmath>
@@ -606,4 +607,4 @@ void renderExecutionCursor(GameState& state) {
     }
 }
 
-}
+} // namespace Renderer
