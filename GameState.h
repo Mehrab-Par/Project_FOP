@@ -69,9 +69,9 @@ enum BlockCategory {
     CAT_VARIABLES, CAT_PEN
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
+
 // Block node
-// ─────────────────────────────────────────────────────────────────────────────
+
 struct Block {
     BlockType    type;
     BlockCategory category;
@@ -91,9 +91,9 @@ struct Block {
     ~Block();
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
+
 // Costume / Sprite
-// ─────────────────────────────────────────────────────────────────────────────
+
 struct Costume {
     std::string  name;
     SDL_Texture* texture;
@@ -130,9 +130,8 @@ struct Sprite {
     ~Sprite();
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Pen layer
-// ─────────────────────────────────────────────────────────────────────────────
+
 struct PenStroke {
     std::vector<SDL_Point> points;
     SDL_Color color;
@@ -140,9 +139,9 @@ struct PenStroke {
     PenStroke();
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
+
 // Per-sprite execution context
-// ─────────────────────────────────────────────────────────────────────────────
+
 struct SpriteExecCtx {
     int  pc;                        // index into editorBlocks for THIS sprite
     std::vector<int>  loopCount;    // repeat counter stack
@@ -154,9 +153,9 @@ struct SpriteExecCtx {
     SpriteExecCtx();
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
+
 // Global execution context
-// ─────────────────────────────────────────────────────────────────────────────
+
 struct ExecutionContext {
     bool running;
     bool paused;
@@ -166,9 +165,9 @@ struct ExecutionContext {
     ExecutionContext();
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
+
 // GameState
-// ─────────────────────────────────────────────────────────────────────────────
+
 struct StageColor { std::string name; SDL_Color color; };
 
 struct GameState {
